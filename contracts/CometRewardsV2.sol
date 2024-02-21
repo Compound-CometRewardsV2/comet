@@ -45,6 +45,7 @@ contract CometRewards {
     /// @notice Rewards claimed per Comet instance and user account
     mapping(address => mapping(address => uint)) public rewardsClaimed;
 
+    //comet-> user->token->rewards
     mapping(address => mapping(address => mapping(address => uint)))
         public rewardsClaimedV2;
 
