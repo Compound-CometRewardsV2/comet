@@ -3,6 +3,7 @@ pragma solidity 0.8.15;
 
 import "./CometInterface.sol";
 import "./ERC20.sol";
+import "./MerkleProof.sol";
 
 /**
  * @title Compound's CometRewards Contract
@@ -19,8 +20,8 @@ contract CometRewards {
     }
 
     struct RewardConfigV2 {
-        bytes startHash;
-        bytes finishHash;
+        bytes32 startMerkleRoot;
+        bytes32 finishMerkleRoot;
         address[] tokens;
         uint64[] rescaleFactors;
         bool[] shouldUpscales;
@@ -44,7 +45,8 @@ contract CometRewards {
     /// @notice Rewards claimed per Comet instance and user account
     mapping(address => mapping(address => uint)) public rewardsClaimed;
 
-    mapping(address => mapping(address => mapping(address => uint))) public rewardsClaimedV2;
+    mapping(address => mapping(address => mapping(address => uint)))
+        public rewardsClaimedV2;
 
     /// @dev The scale for factors
     uint256 internal constant FACTOR_SCALE = 1e18;
@@ -121,7 +123,7 @@ contract CometRewards {
 
     function setRewardConfigWithMultiplierV2(
         address comet,
-        bytes memory startHash,
+        bytes32 startMerkleRoot,
         address[] memory tokens,
         uint256[] memory multipliers,
         uint256 nonce
@@ -150,8 +152,8 @@ contract CometRewards {
         }
 
         rewardConfigV2[comet][nonce] = RewardConfigV2({
-            startHash: startHash,
-            finishHash: "",
+            startMerkleRoot: startMerkleRoot,
+            finishMerkleRoot: "",
             tokens: tokens,
             rescaleFactors: _rescaleFactors,
             shouldUpscales: _shouldUpscales,
@@ -297,18 +299,34 @@ contract CometRewards {
         uint256 campaignId,
         address src,
         address to,
-        address token,//add array support
+        address token, //add array support
+        uint startAccrued,
+        bytes32[] calldata merkleProof,
         bool shouldAccrue
     ) internal {
         RewardConfigV2 memory config = rewardConfigV2[comet][campaignId];
         // if (config.token == address(0)) revert NotSupported(comet);//WIP Add new check
+        bytes32 node = keccak256(abi.encodePacked(src, startAccrued));
+
+        bool isValidProof = MerkleProof.verifyCalldata(
+            merkleProof,
+            config.startMerkleRoot, //add check finish MerkleRoot
+            node
+        );
+        require(isValidProof, "Invalid proof."); //WIP add comp check
 
         if (shouldAccrue) {
             CometInterface(comet).accrueAccount(src);
         }
 
         uint claimed = rewardsClaimedV2[comet][src][token];
-        uint accrued = getRewardAccruedV2(comet, src, config);
+        uint accrued = getRewardAccruedV2(
+            comet,
+            src,
+            token,
+            startAccrued,
+            config
+        );
 
         if (accrued > claimed) {
             uint owed = accrued - claimed;
@@ -340,19 +358,22 @@ contract CometRewards {
     function getRewardAccruedV2(
         address comet,
         address account,
+        address token,
+        uint startAccrued, //if startAccrued = 0 => it new member
         RewardConfigV2 memory config
     ) internal view returns (uint) {
-        uint accrued = CometInterface(comet).baseTrackingAccrued(account);
-
-        //The logic of checking through Merkel will be implemented here.
-        //Also the logic of subtracting the initial "accrued" and taking into account the final hash
-        
-        // if (config.shouldUpscale) {
-        //     accrued *= config.rescaleFactor;
-        // } else {
-        //     accrued /= config.rescaleFactor;
-        // }
-        // return (accrued * config.multiplier) / FACTOR_SCALE;
+        uint accrued = CometInterface(comet).baseTrackingAccrued(account) -
+            startAccrued;
+        for (uint i = 0; i < config.tokens.length; i++) {
+            if (config.tokens[i] == token) {
+                if (config.shouldUpscales[i]) {
+                    accrued *= config.rescaleFactors[i];
+                } else {
+                    accrued /= config.rescaleFactors[i];
+                }
+                return (accrued * config.multipliers[i]) / FACTOR_SCALE;
+            }
+        }
     }
 
     /**
