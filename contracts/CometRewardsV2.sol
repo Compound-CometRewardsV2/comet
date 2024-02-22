@@ -23,11 +23,15 @@ contract CometRewardsV2 {
         bool shouldUpscale;
     }
 
-    struct Compaign {
+    struct Asset {
         AssetConfig config;
+        mapping(address => uint256) claimed;
+    }
+
+    struct Compaign {
         bytes32 startRoot;
         bytes32 finishRoot;
-        mapping(address => uint256) claimed;
+        mapping(address => Asset) assets;
     }
 
     struct RewardOwed {
@@ -37,7 +41,7 @@ contract CometRewardsV2 {
 
     /// @notice The governor address which controls the contract
     address public governor;
-    mapping(address => mapping(address => Compaign)) public compaigns;
+    mapping(address => Compaign) public compaigns;
 
     /// @dev The scale for factors
     uint256 internal constant FACTOR_SCALE = 1e18;
@@ -95,37 +99,32 @@ contract CometRewardsV2 {
         if (msg.sender != governor) revert NotPermitted(msg.sender);
 
         uint64 accrualScale = CometInterface(comet).baseAccrualScale();
+        Compaign storage $ = compaigns[comet];
+
+        if ($.startRoot == bytes32(0)) {
+            $.startRoot = startRoot;
+        }
 
         for (uint256 i = 0; i < assets.length; i++) {
             uint64 tokenScale = safe64(10 ** ERC20(assets[i].key).decimals());
-            
-            Compaign storage $ = compaigns[comet][assets[i].key];
-
-            if ($.startRoot == bytes32(0)) {
-                revert NotSupported(comet, assets[i].key);
-            }
-
-            $.startRoot = startRoot;
-
-            AssetConfig memory config;
 
             emit ConfigUpdated(comet, assets[i].key, assets[i].val);
 
+            Asset storage asset = $.assets[assets[i].key];
+
             if (accrualScale > tokenScale) {
-                config = AssetConfig({
+                asset.config = AssetConfig({
                     multiplier: assets[i].val,
-                    rescaleFactor: 0,
+                    rescaleFactor: accrualScale / tokenScale,
                     shouldUpscale: false
                 });
             } else {
-                config = AssetConfig({
+                asset.config = AssetConfig({
                     multiplier: assets[i].val,
-                    rescaleFactor: 0,
+                    rescaleFactor: tokenScale / accrualScale,
                     shouldUpscale: true
                 });
             }
-
-            $.config = config;
         }
     }
 
@@ -162,7 +161,7 @@ contract CometRewardsV2 {
 
         for (uint i = 0; i < users.length; i++) {
             emit RewardsClaimedSet(users[i], comet, claimedAmounts[i].val);
-            compaigns[comet][claimedAmounts[i].key].claimed[
+            compaigns[comet].assets[claimedAmounts[i].key].claimed[
                 users[i]
             ] = claimedAmounts[i].val;
         }
@@ -203,19 +202,19 @@ contract CometRewardsV2 {
         address account,
         uint startAccrued
     ) external returns (RewardOwed memory) {
-        AssetConfig memory config = compaigns[comet][token].config;
 
-        if (config.multiplier == 0) revert NotSupported(comet, token);
+        Asset storage asset = compaigns[comet].assets[token];
+
+        if (asset.config.multiplier == 0) revert NotSupported(comet, token);
 
         CometInterface(comet).accrueAccount(account);
 
-        uint claimed = compaigns[comet][token].claimed[account];
+        uint claimed = asset.claimed[account];
         uint accrued = getRewardAccrued(
             comet,
             account,
-            token,
             startAccrued,
-            config
+            asset.config
         );
 
         uint owed = accrued > claimed ? accrued - claimed : 0;
@@ -236,7 +235,15 @@ contract CometRewardsV2 {
         uint startAccrued,
         bytes32[] calldata merkleProof
     ) external {
-        claimInternal(comet, src, src, token, startAccrued, merkleProof, shouldAccrue);
+        claimInternal(
+            comet,
+            src,
+            src,
+            token,
+            startAccrued,
+            merkleProof,
+            shouldAccrue
+        );
     }
 
     /**
@@ -268,17 +275,15 @@ contract CometRewardsV2 {
         bytes32[] calldata merkleProof,
         bool shouldAccrue
     ) internal {
-        
-        Compaign storage $ = compaigns[comet][token];
-        AssetConfig memory config = $.config;
+        Asset storage asset = compaigns[comet].assets[token];
 
-        if (config.multiplier == 0) revert NotSupported(comet, token);
+        if (asset.config.multiplier == 0) revert NotSupported(comet, token);
 
         bytes32 node = keccak256(abi.encodePacked(src, startAccrued));
 
         bool isValidProof = MerkleProof.verifyCalldata(
             merkleProof,
-            $.startRoot,
+            compaigns[comet].startRoot,
             node
         );
 
@@ -288,18 +293,17 @@ contract CometRewardsV2 {
             CometInterface(comet).accrueAccount(src);
         }
 
-        uint claimed = $.claimed[src];
+        uint claimed = asset.claimed[src];
         uint accrued = getRewardAccrued(
             comet,
             src,
-            token,
             startAccrued,
-            config
+            asset.config
         );
 
         if (accrued > claimed) {
             uint owed = accrued - claimed;
-            $.claimed[src] = accrued;
+            asset.claimed[src] = accrued;
             doTransferOut(token, to, owed);
 
             emit RewardClaimed(src, to, token, owed);
@@ -309,7 +313,6 @@ contract CometRewardsV2 {
     function getRewardAccrued(
         address comet,
         address account,
-        address token,
         uint startAccrued, //if startAccrued = 0 => it new member
         AssetConfig memory config
     ) internal view returns (uint) {
