@@ -35,6 +35,12 @@ contract CometRewardsV2 {
         address token;
         uint owed;
     }
+    struct Proofs {
+        uint startAccrued;
+        uint finishAccrued;
+        bytes32[] startMerkleProof;
+        bytes32[] finishMerkleProof;
+    }
 
     /// @notice The governor address which controls the contract
     address public governor;
@@ -157,7 +163,8 @@ contract CometRewardsV2 {
 
         for (uint i = 0; i < users.length; i++) {
             emit RewardsClaimedSet(users[i], comet, claimedAmounts[i].val);
-            $.claimed[users[i]] = claimedAmounts[i].val;
+            $.claimed[users[i]] = claimedAmounts[i]
+                .val;
         }
     }
 
@@ -195,6 +202,7 @@ contract CometRewardsV2 {
         address token,
         address account,
         uint startAccrued,
+        uint finishAccrued,
         uint comapignId
     ) external returns (RewardOwed memory) {
         Compaign storage $ = compaigns[comet][comapignId];
@@ -205,7 +213,13 @@ contract CometRewardsV2 {
         CometInterface(comet).accrueAccount(account);
 
         uint claimed = $.claimed[account];
-        uint accrued = getRewardAccrued(comet, account, startAccrued, config);
+        uint accrued = getRewardAccrued(
+            comet,
+            account,
+            startAccrued,
+            finishAccrued,
+            config
+        );
 
         uint owed = accrued > claimed ? accrued - claimed : 0;
         return RewardOwed(token, owed);
@@ -220,7 +234,8 @@ contract CometRewardsV2 {
         address comet,
         address token,
         address account,
-        uint startAccrued
+        uint startAccrued,
+        uint finishAccrued
     ) external returns (RewardOwed[] memory rewardsOwed) {
         rewardsOwed = new RewardOwed[](compaigns[comet].length);
         for (uint i; i < compaigns[comet].length; i++) {
@@ -236,6 +251,7 @@ contract CometRewardsV2 {
                 comet,
                 account,
                 startAccrued,
+                finishAccrued,
                 config
             );
 
@@ -255,18 +271,9 @@ contract CometRewardsV2 {
         address src,
         bool shouldAccrue,
         uint compaingId,
-        uint startAccrued,
-        bytes32[] calldata merkleProof
+        Proofs calldata proofs
     ) external {
-        claimInternal(
-            comet,
-            src,
-            src,
-            compaingId,
-            startAccrued,
-            merkleProof,
-            shouldAccrue
-        );
+        claimInternal(comet, src, src, compaingId, proofs, shouldAccrue);
     }
 
     /**
@@ -280,21 +287,12 @@ contract CometRewardsV2 {
         address src,
         address to,
         uint compaingId,
-        uint startAccrued,
-        bytes32[] calldata merkleProof
+        Proofs calldata proofs
     ) external {
         if (!CometInterface(comet).hasPermission(src, msg.sender))
             revert NotPermitted(msg.sender);
 
-        claimInternal(
-            comet,
-            src,
-            to,
-            compaingId,
-            startAccrued,
-            merkleProof,
-            true
-        );
+        claimInternal(comet, src, to, compaingId, proofs, true);
     }
 
     function claimInternal(
@@ -302,11 +300,30 @@ contract CometRewardsV2 {
         address src,
         address to,
         uint compaingId, //add array support
-        uint startAccrued,
-        bytes32[] calldata merkleProof,
+        Proofs calldata proofs,
         bool shouldAccrue
     ) internal {
         Compaign storage $ = compaigns[comet][compaingId];
+
+        if (proofs.startAccrued > 0) {
+            bool isValidProof = MerkleProof.verifyCalldata(
+                proofs.startMerkleProof,
+                $.startRoot,
+                keccak256(abi.encodePacked(src, proofs.startAccrued))
+            );
+
+            if (!isValidProof) revert InvalidProof();
+        }
+
+        if ($.finishRoot != "") {
+            bool isValidProof2 = MerkleProof.verifyCalldata(
+                proofs.finishMerkleProof,
+                $.finishRoot,
+                keccak256(abi.encodePacked(src, proofs.finishAccrued))
+            );
+
+            if (!isValidProof2) revert InvalidProof();
+        }
 
         for (uint j; j < $.assets.length; j++) {
             address token = $.assets[j];
@@ -314,22 +331,19 @@ contract CometRewardsV2 {
 
             if (config.multiplier == 0) revert NotSupported(comet, token);
 
-            bytes32 node = keccak256(abi.encodePacked(src, startAccrued));
-
-            bool isValidProof = MerkleProof.verifyCalldata(
-                merkleProof,
-                $.startRoot,
-                node
-            );
-
-            if (!isValidProof) revert InvalidProof();
-
             if (shouldAccrue) {
+                //remove from loop
                 CometInterface(comet).accrueAccount(src);
             }
 
             uint claimed = $.claimed[src];
-            uint accrued = getRewardAccrued(comet, src, startAccrued, config);
+            uint accrued = getRewardAccrued(
+                comet,
+                src,
+                proofs.startAccrued,
+                proofs.finishAccrued,
+                config
+            );
 
             if (accrued > claimed) {
                 uint owed = accrued - claimed;
@@ -346,19 +360,17 @@ contract CometRewardsV2 {
         address src,
         address to,
         uint[] memory compaingIds, //add array support
-        uint startAccrued,
-        bytes32[][] calldata merkleProofs,
+        Proofs[] calldata proofs,
         bool shouldAccrue
     ) internal {
-        if (compaingIds.length != merkleProofs.length) revert BadData();
+        if (compaingIds.length != proofs.length) revert BadData();
         for (uint i; i < compaingIds.length; i++) {
             claimInternal(
                 comet,
                 src,
                 to,
                 compaingIds[i],
-                startAccrued,
-                merkleProofs[i],
+                proofs[i],
                 shouldAccrue
             );
         }
@@ -368,9 +380,12 @@ contract CometRewardsV2 {
         address comet,
         address account,
         uint startAccrued, //if startAccrued = 0 => it new member
+        uint finishAccrued,
         AssetConfig memory config
     ) internal view returns (uint) {
-        uint accrued = CometInterface(comet).baseTrackingAccrued(account) -
+        uint accrued;
+        finishAccrued > 0 ? accrued = finishAccrued - startAccrued : accrued =
+            CometInterface(comet).baseTrackingAccrued(account) -
             startAccrued;
 
         if (config.shouldUpscale) {
