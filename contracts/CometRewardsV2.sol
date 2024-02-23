@@ -23,16 +23,12 @@ contract CometRewardsV2 {
         bool shouldUpscale;
     }
 
-    struct Props {
-        AssetConfig config;
-        mapping(address => uint256) claimed;
-    }
-
     struct Compaign {
         bytes32 startRoot;
         bytes32 finishRoot;
         address[] assets;
-        mapping(address => Props) props;
+        mapping(address => AssetConfig) configs;
+        mapping(address => uint256) claimed;
     }
 
     struct RewardOwed {
@@ -105,18 +101,16 @@ contract CometRewardsV2 {
         for (uint256 i = 0; i < assets.length; i++) {
             uint64 tokenScale = safe64(10 ** ERC20(assets[i].key).decimals());
 
-            Props storage prop = $.props[assets[i].key];
-
             emit ConfigUpdated(comet, assets[i].key, assets[i].val);
 
             if (accrualScale > tokenScale) {
-                prop.config = AssetConfig({
+                $.configs[assets[i].key] = AssetConfig({
                     multiplier: (assets[i].val * accrualScale) / tokenScale,
                     rescaleFactor: accrualScale / tokenScale,
                     shouldUpscale: false
                 });
             } else {
-                prop.config = AssetConfig({
+                $.configs[assets[i].key] = AssetConfig({
                     multiplier: (assets[i].val * tokenScale) / accrualScale,
                     rescaleFactor: tokenScale / accrualScale,
                     shouldUpscale: true
@@ -163,9 +157,7 @@ contract CometRewardsV2 {
 
         for (uint i = 0; i < users.length; i++) {
             emit RewardsClaimedSet(users[i], comet, claimedAmounts[i].val);
-            $.props[claimedAmounts[i].key].claimed[users[i]] = claimedAmounts[
-                i
-            ].val;
+            $.claimed[users[i]] = claimedAmounts[i].val;
         }
     }
 
@@ -205,14 +197,14 @@ contract CometRewardsV2 {
         uint startAccrued,
         uint comapignId
     ) external returns (RewardOwed memory) {
-        Props storage prop = compaigns[comet][comapignId].props[token];
-        AssetConfig memory config = prop.config;
+        Compaign storage $ = compaigns[comet][comapignId];
+        AssetConfig memory config = $.configs[token];
 
         if (config.multiplier == 0) revert NotSupported(comet, token);
 
         CometInterface(comet).accrueAccount(account);
 
-        uint claimed = prop.claimed[account];
+        uint claimed = $.claimed[account];
         uint accrued = getRewardAccrued(comet, account, startAccrued, config);
 
         uint owed = accrued > claimed ? accrued - claimed : 0;
@@ -232,14 +224,14 @@ contract CometRewardsV2 {
     ) external returns (RewardOwed[] memory rewardsOwed) {
         rewardsOwed = new RewardOwed[](compaigns[comet].length);
         for (uint i; i < compaigns[comet].length; i++) {
-            Props storage prop = compaigns[comet][i].props[token];
-            AssetConfig memory config = prop.config;
+            Compaign storage $ = compaigns[comet][i];
+            AssetConfig memory config = $.configs[token];
 
             if (config.multiplier == 0) revert NotSupported(comet, token);
 
             CometInterface(comet).accrueAccount(account);
 
-            uint claimed = prop.claimed[account];
+            uint claimed = $.claimed[account];
             uint accrued = getRewardAccrued(
                 comet,
                 account,
@@ -287,14 +279,22 @@ contract CometRewardsV2 {
         address comet,
         address src,
         address to,
-        uint compaingId, 
+        uint compaingId,
         uint startAccrued,
         bytes32[] calldata merkleProof
     ) external {
         if (!CometInterface(comet).hasPermission(src, msg.sender))
             revert NotPermitted(msg.sender);
 
-        claimInternal(comet, src, to, compaingId, startAccrued, merkleProof, true);
+        claimInternal(
+            comet,
+            src,
+            to,
+            compaingId,
+            startAccrued,
+            merkleProof,
+            true
+        );
     }
 
     function claimInternal(
@@ -310,9 +310,9 @@ contract CometRewardsV2 {
 
         for (uint j; j < $.assets.length; j++) {
             address token = $.assets[j];
-            Props storage prop = $.props[token];
+            AssetConfig memory config = $.configs[token];
 
-            if (prop.config.multiplier == 0) revert NotSupported(comet, token);
+            if (config.multiplier == 0) revert NotSupported(comet, token);
 
             bytes32 node = keccak256(abi.encodePacked(src, startAccrued));
 
@@ -328,17 +328,12 @@ contract CometRewardsV2 {
                 CometInterface(comet).accrueAccount(src);
             }
 
-            uint claimed = prop.claimed[src];
-            uint accrued = getRewardAccrued(
-                comet,
-                src,
-                startAccrued,
-                prop.config
-            );
+            uint claimed = $.claimed[src];
+            uint accrued = getRewardAccrued(comet, src, startAccrued, config);
 
             if (accrued > claimed) {
                 uint owed = accrued - claimed;
-                prop.claimed[src] = accrued;
+                $.claimed[src] = accrued;
                 doTransferOut(token, to, owed);
 
                 emit RewardClaimed(src, to, token, owed);
