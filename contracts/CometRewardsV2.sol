@@ -2,6 +2,7 @@
 pragma solidity 0.8.15;
 
 import "./CometInterface.sol";
+import "./CometRewardsInterface.sol";
 import "./ERC20.sol";
 import "./MerkleProof.sol";
 
@@ -198,6 +199,19 @@ contract CometRewardsV2 {
      * @param account The account to check rewards for
      */
     function getRewardOwed(
+        CometRewardsInterface cometRewards,
+        address comet,
+        address account
+    ) external returns (CometRewardsInterface.RewardOwed memory) {
+        return cometRewards.getRewardOwed(comet, account);
+    }
+
+    /**
+     * @notice Calculates the amount of a reward token owed to an account
+     * @param comet The protocol instance
+     * @param account The account to check rewards for
+     */
+    function getRewardOwed(
         address comet,
         address token,
         address account,
@@ -258,6 +272,26 @@ contract CometRewardsV2 {
             uint owed = accrued > claimed ? accrued - claimed : 0;
             rewardsOwed[i] = RewardOwed(token, owed);
         }
+    }
+
+    /**
+     * @notice Claim rewards of token type from a comet instance to owner address
+     * @param comet The protocol instance
+     * @param src The owner to claim for
+     * @param shouldAccrue Whether or not to call accrue first
+     */
+    function claim(CometRewardsInterface cometRewards, address comet, address src, bool shouldAccrue) external {
+        cometRewards.claim(comet, src, shouldAccrue);
+    }
+
+    /**
+     * @notice Claim rewards of token type from a comet instance to a target address
+     * @param comet The protocol instance
+     * @param src The owner to claim for
+     * @param to The address to receive the rewards
+     */
+    function claimTo(CometRewardsInterface cometRewards, address comet, address src, address to, bool shouldAccrue) external {
+        cometRewards.claimTo(comet, src, to, shouldAccrue);
     }
 
     /**
