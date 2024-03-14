@@ -2,6 +2,7 @@
 pragma solidity 0.8.15;
 
 import "./CometInterface.sol";
+import "./CometRewardsInterface.sol";
 import "./ERC20.sol";
 import "./MerkleProof.sol";
 
@@ -44,6 +45,7 @@ contract CometRewardsV2 {
 
     /// @notice The governor address which controls the contract
     address public governor;
+    CometRewardsInterface public cometRewards;
     mapping(address => Compaign[]) public compaigns;
 
     /// @dev The scale for factors
@@ -89,9 +91,10 @@ contract CometRewardsV2 {
      * @notice Construct a new rewards pool
      * @param governor_ The governor who will control the contract
      */
-    constructor(address governor_) {
+    constructor(address governor_, address cometRewards_) {
         if (governor_ == address(0)) revert NullGovernor();
         governor = governor_;
+        cometRewards = CometRewardsInterface(cometRewards_);
     }
 
     function setCompaignsExt(
@@ -168,6 +171,11 @@ contract CometRewardsV2 {
         }
     }
 
+    function setRewardsContract(address cometRewards_) external {
+        if (msg.sender != governor) revert NotPermitted(msg.sender);
+        cometRewards = CometRewardsInterface(cometRewards_);
+    }
+
     /**
      * @notice Withdraw tokens from the contract
      * @param token The reward token address
@@ -190,6 +198,18 @@ contract CometRewardsV2 {
         address oldGovernor = governor;
         governor = newGovernor;
         emit GovernorTransferred(oldGovernor, newGovernor);
+    }
+
+    /**
+     * @notice Calculates the amount of a reward token owed to an account
+     * @param comet The protocol instance
+     * @param account The account to check rewards for
+     */
+    function getRewardOwed(
+        address comet,
+        address account
+    ) external returns (CometRewardsInterface.RewardOwed memory) {
+        return cometRewards.getRewardOwed(comet, account);
     }
 
     /**
@@ -258,6 +278,26 @@ contract CometRewardsV2 {
             uint owed = accrued > claimed ? accrued - claimed : 0;
             rewardsOwed[i] = RewardOwed(token, owed);
         }
+    }
+
+    /**
+     * @notice Claim rewards of token type from a comet instance to owner address
+     * @param comet The protocol instance
+     * @param src The owner to claim for
+     * @param shouldAccrue Whether or not to call accrue first
+     */
+    function claim(address comet, address src, bool shouldAccrue) external {
+        cometRewards.claim(comet, src, shouldAccrue);
+    }
+
+    /**
+     * @notice Claim rewards of token type from a comet instance to a target address
+     * @param comet The protocol instance
+     * @param src The owner to claim for
+     * @param to The address to receive the rewards
+     */
+    function claimTo(address comet, address src, address to, bool shouldAccrue) external {
+        cometRewards.claimTo(comet, src, to, shouldAccrue);
     }
 
     /**
