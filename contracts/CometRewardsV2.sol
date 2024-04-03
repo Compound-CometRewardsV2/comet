@@ -13,9 +13,9 @@ import "./MerkleProof.sol";
  */
 
 contract CometRewardsV2 {
-    struct KeyVal {
-        address key;
-        uint256 val;
+    struct TokenMultiplier {
+        address token;
+        uint256 multiplier;
     }
 
     struct AssetConfig {
@@ -29,16 +29,16 @@ contract CometRewardsV2 {
         bytes32 finishRoot;
         address[] assets;
         mapping(address => AssetConfig) configs;
-        mapping(address => uint256) claimed;
+        mapping(address => mapping(address => uint256)) claimed;
     }
 
     struct RewardOwed {
         address token;
-        uint owed;
+        uint256 owed;
     }
     struct Proofs {
-        uint startAccrued;
-        uint finishAccrued;
+        uint256 startAccrued;
+        uint256 finishAccrued;
         bytes32[] startMerkleProof;
         bytes32[] finishMerkleProof;
     }
@@ -61,6 +61,7 @@ contract CometRewardsV2 {
     event RewardsClaimedSet(
         address indexed user,
         address indexed comet,
+        address indexed token,
         uint256 amount
     );
 
@@ -77,15 +78,22 @@ contract CometRewardsV2 {
         uint256 multiplier
     );
 
+    event NewCampaign(
+        address comet,
+        uint256 campaignId
+    );
+
     /** Custom errors **/
 
     error BadData();
-    error InvalidUInt64(uint);
+    error InmultiplieridUInt64(uint256);
     error NotPermitted(address);
     error NotSupported(address, address);
-    error TransferOutFailed(address, uint);
+    error TransferOutFailed(address, uint256);
     error NullGovernor();
-    error InvalidProof();
+    error InmultiplieridProof();
+
+    error AlreadyConfigured(address);
 
     /**
      * @notice Construct a new rewards pool
@@ -97,77 +105,92 @@ contract CometRewardsV2 {
         cometRewards = CometRewardsInterface(cometRewards_);
     }
 
-    function setCompaignsExt(
+    function setCompaignExt(
         address comet,
         bytes32 startRoot,
-        KeyVal[] memory assets
-    ) public {
+        TokenMultiplier[] memory assets
+    ) public returns(uint256 compaignId) {
         if (msg.sender != governor) revert NotPermitted(msg.sender);
+        if (startRoot == bytes32(0)) revert BadData();
 
         uint64 accrualScale = CometInterface(comet).baseAccrualScale();
         Compaign storage $ = compaigns[comet].push();
         $.startRoot = startRoot;
         for (uint256 i = 0; i < assets.length; i++) {
-            uint64 tokenScale = safe64(10 ** ERC20(assets[i].key).decimals());
+            uint64 tokenScale = safe64(10 ** ERC20(assets[i].token).decimals());
 
-            emit ConfigUpdated(comet, assets[i].key, assets[i].val);
+            emit ConfigUpdated(comet, assets[i].token, assets[i].multiplier);
 
             if (accrualScale > tokenScale) {
-                $.configs[assets[i].key] = AssetConfig({
-                    multiplier: (assets[i].val * accrualScale) / tokenScale,
+                $.configs[assets[i].token] = AssetConfig({
+                    multiplier: assets[i].multiplier,
                     rescaleFactor: accrualScale / tokenScale,
                     shouldUpscale: false
                 });
             } else {
-                $.configs[assets[i].key] = AssetConfig({
-                    multiplier: (assets[i].val * tokenScale) / accrualScale,
+                $.configs[assets[i].token] = AssetConfig({
+                    multiplier: assets[i].multiplier,
                     rescaleFactor: tokenScale / accrualScale,
                     shouldUpscale: true
                 });
             }
 
-            $.assets.push(assets[i].key);
+            $.assets.push(assets[i].token);
         }
+
+        emit NewCampaign(
+            comet,
+            $.assets.length - 1
+        );
+
+        return($.assets.length - 1);
     }
 
     /**
      * @notice Set the reward token for a Comet instance
      * @param comet The protocol instance
+     * @param startRoot The root of the Mercle tree for the startAccrued multiplierues
      * @param tokens The reward tokens addresses
      */
     function setCompaign(
         address comet,
         bytes32 startRoot,
         address[] calldata tokens
-    ) external {
-        KeyVal[] memory assets = new KeyVal[](tokens.length);
-        for (uint i = 0; i < tokens.length; i++) {
-            assets[i] = KeyVal({key: tokens[i], val: FACTOR_SCALE});
+    ) external returns(uint256 compaignId) {
+        TokenMultiplier[] memory assets = new TokenMultiplier[](tokens.length);
+        for (uint256 i = 0; i < tokens.length; i++) {
+            assets[i] = TokenMultiplier({token: tokens[i], multiplier: FACTOR_SCALE});
         }
-        setCompaignsExt(comet, startRoot, assets);
+        return setCompaignExt(comet, startRoot, assets);
     }
 
     /**
      * @notice Set the rewards claimed for a list of users
      * @param comet The protocol instance to populate the data for
+     * @param compaignId The id of the compaign
      * @param users The list of users to populate the data for
-     * @param claimedAmounts The list of claimed amounts to populate the data with
+     * @param claimedAmounts The list of claimed amounts for each token to populate the data with
      */
     function setRewardsClaimed(
         address comet,
-        uint256 comapignId,
+        uint256 compaignId,
         address[] calldata users,
-        KeyVal[] calldata claimedAmounts
+        address[][] calldata tokens,
+        uint256[][] calldata claimedAmounts
     ) external {
         if (msg.sender != governor) revert NotPermitted(msg.sender);
         if (users.length != claimedAmounts.length) revert BadData();
+        if (tokens.length != claimedAmounts.length) revert BadData();
 
-        Compaign storage $ = compaigns[comet][comapignId];
+        Compaign storage $ = compaigns[comet][compaignId];
 
-        for (uint i = 0; i < users.length; i++) {
-            emit RewardsClaimedSet(users[i], comet, claimedAmounts[i].val);
-            $.claimed[users[i]] = claimedAmounts[i]
-                .val;
+        for (uint256 i = 0; i < claimedAmounts.length; i++) {
+            if ($.assets.length != claimedAmounts[i].length) revert BadData();
+            if ($.assets.length != tokens[i].length) revert BadData();
+            for(uint256 j = 0; j < claimedAmounts[i].length; j++){
+                emit RewardsClaimedSet(users[i], comet, tokens[i][j], claimedAmounts[i][j]);
+                $.claimed[users[i]][tokens[i][j]] = claimedAmounts[i][j];
+            }
         }
     }
 
@@ -177,12 +200,29 @@ contract CometRewardsV2 {
     }
 
     /**
+     * @notice Set the reward token for a Comet instance
+     * @param comet The protocol instance
+     * @param compaignId The id of the campaign
+     * @param finishRoot The root of the Mercle tree for the finishAccrued multiplierues
+     */
+    function setCompaignFinish(
+        address comet,
+        bytes32 finishRoot,
+        uint256 compaignId
+    ) public {
+        if (msg.sender != governor) revert NotPermitted(msg.sender);
+        if (finishRoot == bytes32(0)) revert BadData();
+        
+        compaigns[comet][compaignId].finishRoot = finishRoot;
+    }
+
+    /**
      * @notice Withdraw tokens from the contract
      * @param token The reward token address
      * @param to Where to send the tokens
      * @param amount The number of tokens to withdraw
      */
-    function withdrawToken(address token, address to, uint amount) external {
+    function withdrawToken(address token, address to, uint256 amount) external {
         if (msg.sender != governor) revert NotPermitted(msg.sender);
 
         doTransferOut(token, to, amount);
@@ -195,9 +235,8 @@ contract CometRewardsV2 {
     function transferGovernor(address newGovernor) external {
         if (msg.sender != governor) revert NotPermitted(msg.sender);
 
-        address oldGovernor = governor;
+        emit GovernorTransferred(governor, newGovernor);
         governor = newGovernor;
-        emit GovernorTransferred(oldGovernor, newGovernor);
     }
 
     /**
@@ -217,23 +256,24 @@ contract CometRewardsV2 {
      * @param comet The protocol instance
      * @param account The account to check rewards for
      */
-    function getRewardOwed(
+    function getRewardOwedExt(
         address comet,
+        uint256 compaignId,
         address token,
         address account,
-        uint startAccrued,
-        uint finishAccrued,
-        uint comapignId
-    ) external returns (RewardOwed memory) {
-        Compaign storage $ = compaigns[comet][comapignId];
+        uint256 startAccrued,
+        uint256 finishAccrued
+    ) external returns (RewardOwed memory) {        
+        if (compaigns[comet].length == 0) revert NotSupported(comet, address(0));
+
+        Compaign storage $ = compaigns[comet][compaignId];
         AssetConfig memory config = $.configs[token];
 
         if (config.multiplier == 0) revert NotSupported(comet, token);
 
         CometInterface(comet).accrueAccount(account);
-
-        uint claimed = $.claimed[account];
-        uint accrued = getRewardAccrued(
+        uint256 claimed = $.claimed[account][token];
+        uint256 accrued = getRewardAccrued(
             comet,
             account,
             startAccrued,
@@ -241,8 +281,10 @@ contract CometRewardsV2 {
             config
         );
 
-        uint owed = accrued > claimed ? accrued - claimed : 0;
-        return RewardOwed(token, owed);
+        return RewardOwed(
+            token,
+            accrued > claimed ? accrued - claimed : 0
+        );
     }
 
     /**
@@ -254,11 +296,11 @@ contract CometRewardsV2 {
         address comet,
         address token,
         address account,
-        uint startAccrued,
-        uint finishAccrued
+        uint256 startAccrued,
+        uint256 finishAccrued
     ) external returns (RewardOwed[] memory rewardsOwed) {
         rewardsOwed = new RewardOwed[](compaigns[comet].length);
-        for (uint i; i < compaigns[comet].length; i++) {
+        for (uint256 i; i < compaigns[comet].length; i++) {
             Compaign storage $ = compaigns[comet][i];
             AssetConfig memory config = $.configs[token];
 
@@ -266,8 +308,8 @@ contract CometRewardsV2 {
 
             CometInterface(comet).accrueAccount(account);
 
-            uint claimed = $.claimed[account];
-            uint accrued = getRewardAccrued(
+            uint256 claimed = $.claimed[account][token];
+            uint256 accrued = getRewardAccrued(
                 comet,
                 account,
                 startAccrued,
@@ -275,8 +317,10 @@ contract CometRewardsV2 {
                 config
             );
 
-            uint owed = accrued > claimed ? accrued - claimed : 0;
-            rewardsOwed[i] = RewardOwed(token, owed);
+            rewardsOwed[i] = RewardOwed(
+                token,
+                accrued > claimed ? accrued - claimed : 0
+            );
         }
     }
 
@@ -306,14 +350,24 @@ contract CometRewardsV2 {
      * @param src The owner to claim for
      * @param shouldAccrue Whether or not to call accrue first
      */
-    function claim(
+    function claimExt(
         address comet,
         address src,
         bool shouldAccrue,
-        uint compaingId,
+        uint256 compaingId,
         Proofs calldata proofs
     ) external {
         claimInternal(comet, src, src, compaingId, proofs, shouldAccrue);
+    }
+
+    function claimExtBatch(
+        address comet,
+        address src,
+        bool shouldAccrue,
+        uint256[] memory compaingIDs,
+        Proofs[] calldata proofs
+    ) external {
+        claimInternalBatch(comet, src, src, compaingIDs, proofs, shouldAccrue);
     }
 
     /**
@@ -322,72 +376,101 @@ contract CometRewardsV2 {
      * @param src The owner to claim for
      * @param to The address to receive the rewards
      */
-    function claimTo(
+    function claimExtTo(
         address comet,
         address src,
         address to,
-        uint compaingId,
+        bool shouldAccrue,
+        uint256 compaingId,
         Proofs calldata proofs
     ) external {
         if (!CometInterface(comet).hasPermission(src, msg.sender))
             revert NotPermitted(msg.sender);
 
-        claimInternal(comet, src, to, compaingId, proofs, true);
+        claimInternal(comet, src, to, compaingId, proofs, shouldAccrue);
+    }
+
+    function rewardsClaimed(
+        address comet,
+        uint256 compaignId,
+        address src,
+        address token
+    ) external view returns(uint256) {
+        return compaigns[comet][compaignId].claimed[src][token];
+    }
+
+    /**
+     * @notice Claim rewards of token type from a comet instance to a target address
+     * @param comet The protocol instance
+     * @param src The owner to claim for
+     * @param to The address to receive the rewards
+     */
+    function claimExtToBatch(
+        address comet,
+        address src,
+        address to,
+        bool shouldAccrue,
+        uint256[] memory compaingIDs,
+        Proofs[] calldata proofs
+    ) external {
+        if (!CometInterface(comet).hasPermission(src, msg.sender))
+            revert NotPermitted(msg.sender);
+
+        claimInternalBatch(comet, src, to, compaingIDs, proofs, shouldAccrue);
     }
 
     function claimInternal(
         address comet,
         address src,
         address to,
-        uint compaingId, //add array support
+        uint256 compaingId, //add array support
         Proofs calldata proofs,
         bool shouldAccrue
     ) internal {
+        if (compaigns[comet].length == 0) revert NotSupported(comet, address(0));
         Compaign storage $ = compaigns[comet][compaingId];
 
         if (proofs.startAccrued > 0) {
             bool isValidProof = MerkleProof.verifyCalldata(
                 proofs.startMerkleProof,
                 $.startRoot,
-                keccak256(abi.encodePacked(src, proofs.startAccrued))
+                keccak256(bytes.concat(keccak256(abi.encode(src, proofs.startAccrued))))
             );
 
-            if (!isValidProof) revert InvalidProof();
+            if (!isValidProof) revert InmultiplieridProof();
         }
 
-        if ($.finishRoot != "") {
+        if ($.finishRoot != bytes32(0)) {
             bool isValidProof2 = MerkleProof.verifyCalldata(
                 proofs.finishMerkleProof,
                 $.finishRoot,
-                keccak256(abi.encodePacked(src, proofs.finishAccrued))
+                keccak256(bytes.concat(keccak256(abi.encode(src, proofs.finishAccrued))))
             );
 
-            if (!isValidProof2) revert InvalidProof();
+            if (!isValidProof2) revert InmultiplieridProof();
         }
-
-        for (uint j; j < $.assets.length; j++) {
+        if (shouldAccrue) {
+            //remove from loop
+            CometInterface(comet).accrueAccount(src);
+        }
+        for (uint256 j; j < $.assets.length; j++) {
             address token = $.assets[j];
             AssetConfig memory config = $.configs[token];
 
-            if (config.multiplier == 0) revert NotSupported(comet, token);
 
-            if (shouldAccrue) {
-                //remove from loop
-                CometInterface(comet).accrueAccount(src);
-            }
-
-            uint claimed = $.claimed[src];
-            uint accrued = getRewardAccrued(
+            uint256 claimed = $.claimed[src][token];
+            uint256 accrued = proofs.startAccrued > 0? getRewardAccrued(
                 comet,
                 src,
                 proofs.startAccrued,
                 proofs.finishAccrued,
                 config
-            );
+            )
+            : CometInterface(comet).baseTrackingAccrued(src);
 
             if (accrued > claimed) {
-                uint owed = accrued - claimed;
-                $.claimed[src] = accrued;
+                uint256 owed = accrued - claimed;
+                $.claimed[src][token] = accrued;
                 doTransferOut(token, to, owed);
 
                 emit RewardClaimed(src, to, token, owed);
@@ -395,16 +478,16 @@ contract CometRewardsV2 {
         }
     }
 
-    function claimInternalExt(
+    function claimInternalBatch(
         address comet,
         address src,
         address to,
-        uint[] memory compaingIds, //add array support
+        uint256[] memory compaingIds, //add array support
         Proofs[] calldata proofs,
         bool shouldAccrue
     ) internal {
         if (compaingIds.length != proofs.length) revert BadData();
-        for (uint i; i < compaingIds.length; i++) {
+        for (uint256 i; i < compaingIds.length; i++) {
             claimInternal(
                 comet,
                 src,
@@ -419,15 +502,17 @@ contract CometRewardsV2 {
     function getRewardAccrued(
         address comet,
         address account,
-        uint startAccrued, //if startAccrued = 0 => it new member
-        uint finishAccrued,
+        uint256 startAccrued, //if startAccrued = 0 => it new member
+        uint256 finishAccrued,
         AssetConfig memory config
-    ) internal view returns (uint) {
-        uint accrued;
-        finishAccrued > 0 ? accrued = finishAccrued - startAccrued : accrued =
-            CometInterface(comet).baseTrackingAccrued(account) -
-            startAccrued;
-
+    ) internal view returns (uint256 accrued) {
+        if(finishAccrued > 0 && finishAccrued < CometInterface(comet).baseTrackingAccrued(account)){
+            accrued = finishAccrued - startAccrued;
+        }
+         else{
+            accrued = CometInterface(comet).baseTrackingAccrued(account) -
+                startAccrued;
+        }
         if (config.shouldUpscale) {
             accrued *= config.rescaleFactor;
         } else {
@@ -439,7 +524,7 @@ contract CometRewardsV2 {
     /**
      * @dev Safe ERC20 transfer out
      */
-    function doTransferOut(address token, address to, uint amount) internal {
+    function doTransferOut(address token, address to, uint256 amount) internal {
         bool success = ERC20(token).transfer(to, amount);
         if (!success) revert TransferOutFailed(to, amount);
     }
@@ -447,8 +532,8 @@ contract CometRewardsV2 {
     /**
      * @dev Safe cast to uint64
      */
-    function safe64(uint n) internal pure returns (uint64) {
-        if (n > type(uint64).max) revert InvalidUInt64(n);
+    function safe64(uint256 n) internal pure returns (uint64) {
+        if (n > type(uint64).max) revert InmultiplieridUInt64(n);
         return uint64(n);
     }
 }
