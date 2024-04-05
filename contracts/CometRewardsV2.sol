@@ -2,7 +2,6 @@
 pragma solidity 0.8.15;
 
 import "./CometInterface.sol";
-import "./CometRewardsInterface.sol";
 import "./ERC20.sol";
 import "./MerkleProof.sol";
 
@@ -37,15 +36,19 @@ contract CometRewardsV2 {
         uint256 owed;
     }
     struct Proofs {
+        uint256 index;
         uint256 startAccrued;
         uint256 finishAccrued;
         bytes32[] startMerkleProof;
         bytes32[] finishMerkleProof;
     }
 
+    struct MultiProofs{
+        Proofs[2] proofs;
+    }
+
     /// @notice The governor address which controls the contract
     address public governor;
-    CometRewardsInterface public cometRewards;
     mapping(address => Compaign[]) public compaigns;
 
     /// @dev The scale for factors
@@ -91,18 +94,18 @@ contract CometRewardsV2 {
     error NotSupported(address, address);
     error TransferOutFailed(address, uint256);
     error NullGovernor();
-    error InmultiplieridProof();
-
+    error InvalidProof();
     error AlreadyConfigured(address);
+    error NotANewMember(address);
+    error CompaignEnded(address, uint256);
 
     /**
      * @notice Construct a new rewards pool
      * @param governor_ The governor who will control the contract
      */
-    constructor(address governor_, address cometRewards_) {
+    constructor(address governor_) {
         if (governor_ == address(0)) revert NullGovernor();
         governor = governor_;
-        cometRewards = CometRewardsInterface(cometRewards_);
     }
 
     function setCompaignExt(
@@ -194,11 +197,6 @@ contract CometRewardsV2 {
         }
     }
 
-    function setRewardsContract(address cometRewards_) external {
-        if (msg.sender != governor) revert NotPermitted(msg.sender);
-        cometRewards = CometRewardsInterface(cometRewards_);
-    }
-
     /**
      * @notice Set the reward token for a Comet instance
      * @param comet The protocol instance
@@ -246,18 +244,6 @@ contract CometRewardsV2 {
      */
     function getRewardOwed(
         address comet,
-        address account
-    ) external returns (CometRewardsInterface.RewardOwed memory) {
-        return cometRewards.getRewardOwed(comet, account);
-    }
-
-    /**
-     * @notice Calculates the amount of a reward token owed to an account
-     * @param comet The protocol instance
-     * @param account The account to check rewards for
-     */
-    function getRewardOwedExt(
-        address comet,
         uint256 compaignId,
         address token,
         address account,
@@ -273,13 +259,14 @@ contract CometRewardsV2 {
 
         CometInterface(comet).accrueAccount(account);
         uint256 claimed = $.claimed[account][token];
-        uint256 accrued = getRewardAccrued(
-            comet,
-            account,
-            startAccrued,
-            finishAccrued,
-            config
-        );
+        uint256 accrued = startAccrued > 0? getRewardAccrued(
+                comet,
+                account,
+                startAccrued,
+                finishAccrued,
+                config
+            )
+            : CometInterface(comet).baseTrackingAccrued(account);
 
         return RewardOwed(
             token,
@@ -324,47 +311,121 @@ contract CometRewardsV2 {
         }
     }
 
-    /**
-     * @notice Claim rewards of token type from a comet instance to owner address
-     * @param comet The protocol instance
-     * @param src The owner to claim for
-     * @param shouldAccrue Whether or not to call accrue first
-     */
-    function claim(address comet, address src, bool shouldAccrue) external {
-        cometRewards.claim(comet, src, shouldAccrue);
-    }
-
-    /**
-     * @notice Claim rewards of token type from a comet instance to a target address
-     * @param comet The protocol instance
-     * @param src The owner to claim for
-     * @param to The address to receive the rewards
-     */
-    function claimTo(address comet, address src, address to, bool shouldAccrue) external {
-        cometRewards.claimTo(comet, src, to, shouldAccrue);
-    }
-
-    /**
-     * @notice Claim rewards of token type from a comet instance to owner address
-     * @param comet The protocol instance
-     * @param src The owner to claim for
-     * @param shouldAccrue Whether or not to call accrue first
-     */
-    function claimExt(
+    function claimForNewMember(
         address comet,
+        uint256 compaignId,
         address src,
         bool shouldAccrue,
+        address[2] calldata neighbors,
+        Proofs[2] calldata proofs
+    ) external {
+        if (!verifyMembership(comet, src, compaignId, neighbors, proofs))
+            revert NotANewMember(src);
+
+        claimInternalForNewMember(
+            comet,
+            src,
+            src,
+            compaignId,
+            shouldAccrue
+        );
+    }
+
+    function claimBatchForNewMember(
+        address comet,
+        uint256[] memory compaignIDs,
+        address src,
+        bool shouldAccrue,
+        address[2][] calldata neighbors,
+        MultiProofs[] calldata multiProofs
+    ) external {
+        if (compaignIDs.length != neighbors.length) revert BadData();
+        if (compaignIDs.length != multiProofs.length) revert BadData();
+        for (uint256 i; i < compaignIDs.length; i++) {
+            if (!verifyMembership(comet, src, compaignIDs[i], neighbors[i], multiProofs[i].proofs))
+                revert NotANewMember(src);
+
+            claimInternalForNewMember(
+                comet,
+                src,
+                src,
+                compaignIDs[i],
+                shouldAccrue
+            );
+        }
+    }
+
+    function claimToForNewMember(
+        address comet,
+        uint256 compaignId,
+        address src,
+        address to,
+        bool shouldAccrue,
+        address[2] calldata neighbors,
+        Proofs[2] calldata proofs
+    ) external {
+        if(!CometInterface(comet).hasPermission(src, msg.sender))
+            revert NotPermitted(msg.sender);
+        if (!verifyMembership(comet, src, compaignId, neighbors, proofs))
+            revert NotANewMember(src);
+
+        claimInternalForNewMember(
+            comet,
+            src,
+            to,
+            compaignId,
+            shouldAccrue
+        );
+    }
+
+    function claimToBatchForNewMember(
+        address comet,
+        uint256[] memory compaignIDs,
+        address src,
+        address to,
+        bool shouldAccrue,
+        address[2][] calldata neighbors,
+        Proofs[2][] calldata proofs
+    ) external {
+        if (compaignIDs.length != neighbors.length) revert BadData();
+        if (compaignIDs.length != proofs.length) revert BadData();
+        for (uint256 i; i < compaignIDs.length; i++) {
+            if(!CometInterface(comet).hasPermission(src, msg.sender))
+                revert NotPermitted(msg.sender);
+            if (!verifyMembership(comet, src, compaignIDs[i], neighbors[i], proofs[i]))
+                revert NotANewMember(src);
+
+            claimInternalForNewMember(
+                comet,
+                src,
+                to,
+                compaignIDs[i],
+                shouldAccrue
+            );
+        }
+    }
+
+    /**
+     * @notice Claim rewards of token type from a comet instance to owner address
+     * @param comet The protocol instance
+     * @param src The owner to claim for
+     * @param shouldAccrue Whether or not to call accrue first
+     */
+    function claim(
+        address comet,
         uint256 compaingId,
+        address src,
+        bool shouldAccrue,
         Proofs calldata proofs
     ) external {
         claimInternal(comet, src, src, compaingId, proofs, shouldAccrue);
     }
 
-    function claimExtBatch(
+    function claimBatch(
         address comet,
+        uint256[] memory compaingIDs,
         address src,
         bool shouldAccrue,
-        uint256[] memory compaingIDs,
         Proofs[] calldata proofs
     ) external {
         claimInternalBatch(comet, src, src, compaingIDs, proofs, shouldAccrue);
@@ -376,12 +437,12 @@ contract CometRewardsV2 {
      * @param src The owner to claim for
      * @param to The address to receive the rewards
      */
-    function claimExtTo(
+    function claimTo(
         address comet,
+        uint256 compaingId,
         address src,
         address to,
         bool shouldAccrue,
-        uint256 compaingId,
         Proofs calldata proofs
     ) external {
         if (!CometInterface(comet).hasPermission(src, msg.sender))
@@ -405,12 +466,12 @@ contract CometRewardsV2 {
      * @param src The owner to claim for
      * @param to The address to receive the rewards
      */
-    function claimExtToBatch(
+    function claimToBatch(
         address comet,
+        uint256[] memory compaingIDs,
         address src,
         address to,
         bool shouldAccrue,
-        uint256[] memory compaingIDs,
         Proofs[] calldata proofs
     ) external {
         if (!CometInterface(comet).hasPermission(src, msg.sender))
@@ -418,6 +479,79 @@ contract CometRewardsV2 {
 
         claimInternalBatch(comet, src, to, compaingIDs, proofs, shouldAccrue);
     }
+
+    function verifyMembership(
+        address comet,
+        address account,
+        uint256 compaignId,
+        address[2] calldata neighbors,
+        Proofs[2] calldata proofs
+    ) internal view returns(bool) {
+        if(!(neighbors[0] < account && account < neighbors[1])) revert BadData();
+        if(!((proofs[1].index > proofs[0].index) && (proofs[1].index - proofs[0].index == 1))) revert BadData();
+        if (compaigns[comet].length == 0) revert NotSupported(comet, address(0));
+        Compaign storage $ = compaigns[comet][compaignId];
+
+        bool isValidProof = MerkleProof.verifyCalldata(
+            proofs[0].startMerkleProof,
+            $.startRoot,
+            keccak256(bytes.concat(keccak256(abi.encode(neighbors[0], proofs[0].index, proofs[0].startAccrued)))
+            )
+        );
+
+        if (!isValidProof) revert InvalidProof();
+
+        isValidProof = MerkleProof.verifyCalldata(
+            proofs[1].startMerkleProof,
+            $.startRoot,
+            keccak256(bytes.concat(keccak256(abi.encode(neighbors[1], proofs[1].index, proofs[1].startAccrued)))
+            )
+        );
+
+        if (!isValidProof) revert InvalidProof();
+
+        return true;
+    }
+
+    function claimInternalForNewMember(
+        address comet,
+        address src,
+        address to,
+        uint256 compaingId, //add array support
+        bool shouldAccrue
+    ) internal {
+        if (compaigns[comet].length == 0) revert NotSupported(comet, address(0));
+        Compaign storage $ = compaigns[comet][compaingId];
+
+        if ($.finishRoot != bytes32(0)) {
+            revert CompaignEnded(comet, compaingId);
+        }
+        if (shouldAccrue) {
+            //remove from loop
+            CometInterface(comet).accrueAccount(src);
+        }
+        for (uint256 j; j < $.assets.length; j++) {
+            AssetConfig memory config = $.configs[$.assets[j]];
+            address token = $.assets[j];
+            uint256 claimed = $.claimed[src][token];
+            uint256 accrued = CometInterface(comet).baseTrackingAccrued(src);
+
+            if (config.shouldUpscale) {
+                accrued *= config.rescaleFactor;
+            } else {
+                accrued /= config.rescaleFactor;
+            }
+            accrued = (accrued * config.multiplier) / FACTOR_SCALE;
+            if (accrued > claimed) {
+                uint256 owed = accrued - claimed;
+                $.claimed[src][token] = accrued;
+                doTransferOut(token, to, owed);
+
+                emit RewardClaimed(src, to, token, owed);
+            }
+        }
+    }
+
 
     function claimInternal(
         address comet,
@@ -429,25 +563,23 @@ contract CometRewardsV2 {
     ) internal {
         if (compaigns[comet].length == 0) revert NotSupported(comet, address(0));
         Compaign storage $ = compaigns[comet][compaingId];
+        
+        bool isValidProof = MerkleProof.verifyCalldata(
+            proofs.startMerkleProof,
+            $.startRoot,
+            keccak256(bytes.concat(keccak256(abi.encode(src, proofs.index, proofs.startAccrued))))
+        );
 
-        if (proofs.startAccrued > 0) {
-            bool isValidProof = MerkleProof.verifyCalldata(
-                proofs.startMerkleProof,
-                $.startRoot,
-                keccak256(bytes.concat(keccak256(abi.encode(src, proofs.startAccrued))))
-            );
-
-            if (!isValidProof) revert InmultiplieridProof();
-        }
+        if (!isValidProof) revert InvalidProof();
 
         if ($.finishRoot != bytes32(0)) {
             bool isValidProof2 = MerkleProof.verifyCalldata(
                 proofs.finishMerkleProof,
                 $.finishRoot,
-                keccak256(bytes.concat(keccak256(abi.encode(src, proofs.finishAccrued))))
+                keccak256(bytes.concat(keccak256(abi.encode(src, proofs.index, proofs.finishAccrued))))
             );
 
-            if (!isValidProof2) revert InmultiplieridProof();
+            if (!isValidProof2) revert InvalidProof();
         }
         if (shouldAccrue) {
             //remove from loop
@@ -506,7 +638,7 @@ contract CometRewardsV2 {
         uint256 finishAccrued,
         AssetConfig memory config
     ) internal view returns (uint256 accrued) {
-        if(finishAccrued > 0 && finishAccrued < CometInterface(comet).baseTrackingAccrued(account)){
+        if(finishAccrued > 0){
             accrued = finishAccrued - startAccrued;
         }
          else{

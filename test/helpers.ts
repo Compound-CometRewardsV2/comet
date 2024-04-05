@@ -144,7 +144,7 @@ export type RewardsV2 = {
   governor: SignerWithAddress;
   rewards: CometRewards;
   rewardsV2: CometRewardsV2;
-  tree:  StandardMerkleTree<[string, string]>;
+  tree:  StandardMerkleTree<[string, string, string]>;
 };
 
 export type GetRewardsOwed = {
@@ -658,7 +658,26 @@ export async function makeRewards(opts: RewardsOpts = {}): Promise<Rewards> {
 
 export async function generateTree(accountsPrepared: [string, string][]) {
   if(accountsPrepared.length <= 1) throw new Error('Tree must have at least 2 leaves');
-  return StandardMerkleTree.of(accountsPrepared, ['address', 'uint256']);
+
+  // add zero address and max address to the ends of the array
+  accountsPrepared.unshift([ethers.constants.AddressZero, '0']);
+  accountsPrepared.push(['0xffffffffffffffffffffffffffffffffffffffff', '0']);
+
+  // sort accounts by address (compare as bigints)
+  accountsPrepared.sort((a, b) => {
+    const addressA = BigInt(a[0]);
+    const addressB = BigInt(b[0]);
+    if (addressA < addressB) return -1;
+    if (addressA > addressB) return 1;
+    return 0;
+  });
+  // index all accounts
+  let accountsIndexed: [string, string, string][] = [];
+  for (let i = 0; i < accountsPrepared.length; i++) {
+    accountsIndexed.push([accountsPrepared[i][0], i.toString(), accountsPrepared[i][1],]);
+  }
+
+  return StandardMerkleTree.of(accountsIndexed, ['address', 'uint256', 'uint256']);
 }
 
 export async function getProof(address : string, tree) {
@@ -686,8 +705,7 @@ export async function makeRewardsV2(
     'CometRewardsV2'
   )) as CometRewardsV2__factory;
   const rewardsV2 = await RewardsV2Factory.deploy(
-    governor.address,
-    rewards.address
+    governor.address
   );
   
   await rewardsV2.deployed();
