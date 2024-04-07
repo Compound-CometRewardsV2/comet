@@ -36,7 +36,8 @@ contract CometRewardsV2 {
         uint256 owed;
     }
     struct Proofs {
-        uint256 index;
+        uint256 startIndex;
+        uint256 finishIndex;
         uint256 startAccrued;
         uint256 finishAccrued;
         bytes32[] startMerkleProof;
@@ -45,6 +46,12 @@ contract CometRewardsV2 {
 
     struct MultiProofs{
         Proofs[2] proofs;
+    }
+
+    struct FinisProof{
+        uint256 finishIndex;
+        uint256 finishAccrued;
+        bytes32[] finishMerkleProof;
     }
 
     /// @notice The governor address which controls the contract
@@ -317,7 +324,8 @@ contract CometRewardsV2 {
         address src,
         bool shouldAccrue,
         address[2] calldata neighbors,
-        Proofs[2] calldata proofs
+        Proofs[2] calldata proofs,
+        FinisProof calldata finishProof
     ) external {
         if (!verifyMembership(comet, src, compaignId, neighbors, proofs))
             revert NotANewMember(src);
@@ -327,7 +335,8 @@ contract CometRewardsV2 {
             src,
             src,
             compaignId,
-            shouldAccrue
+            shouldAccrue,
+            finishProof
         );
     }
 
@@ -337,7 +346,8 @@ contract CometRewardsV2 {
         address src,
         bool shouldAccrue,
         address[2][] calldata neighbors,
-        MultiProofs[] calldata multiProofs
+        MultiProofs[] calldata multiProofs,
+        FinisProof[] calldata finishProof
     ) external {
         if (compaignIDs.length != neighbors.length) revert BadData();
         if (compaignIDs.length != multiProofs.length) revert BadData();
@@ -350,7 +360,8 @@ contract CometRewardsV2 {
                 src,
                 src,
                 compaignIDs[i],
-                shouldAccrue
+                shouldAccrue,
+                finishProof[i]
             );
         }
     }
@@ -362,7 +373,8 @@ contract CometRewardsV2 {
         address to,
         bool shouldAccrue,
         address[2] calldata neighbors,
-        Proofs[2] calldata proofs
+        Proofs[2] calldata proofs,
+        FinisProof calldata finishProof
     ) external {
         if(!CometInterface(comet).hasPermission(src, msg.sender))
             revert NotPermitted(msg.sender);
@@ -374,7 +386,8 @@ contract CometRewardsV2 {
             src,
             to,
             compaignId,
-            shouldAccrue
+            shouldAccrue,
+            finishProof
         );
     }
 
@@ -385,7 +398,8 @@ contract CometRewardsV2 {
         address to,
         bool shouldAccrue,
         address[2][] calldata neighbors,
-        Proofs[2][] calldata proofs
+        Proofs[2][] calldata proofs,
+        FinisProof[] calldata finishProof
     ) external {
         if (compaignIDs.length != neighbors.length) revert BadData();
         if (compaignIDs.length != proofs.length) revert BadData();
@@ -400,7 +414,8 @@ contract CometRewardsV2 {
                 src,
                 to,
                 compaignIDs[i],
-                shouldAccrue
+                shouldAccrue,
+                finishProof[i]
             );
         }
     }
@@ -488,14 +503,14 @@ contract CometRewardsV2 {
         Proofs[2] calldata proofs
     ) internal view returns(bool) {
         if(!(neighbors[0] < account && account < neighbors[1])) revert BadData();
-        if(!((proofs[1].index > proofs[0].index) && (proofs[1].index - proofs[0].index == 1))) revert BadData();
+        if(!((proofs[1].startIndex > proofs[0].startIndex) && (proofs[1].startIndex - proofs[0].startIndex == 1))) revert BadData();
         if (compaigns[comet].length == 0) revert NotSupported(comet, address(0));
         Compaign storage $ = compaigns[comet][compaignId];
 
         bool isValidProof = MerkleProof.verifyCalldata(
             proofs[0].startMerkleProof,
             $.startRoot,
-            keccak256(bytes.concat(keccak256(abi.encode(neighbors[0], proofs[0].index, proofs[0].startAccrued)))
+            keccak256(bytes.concat(keccak256(abi.encode(neighbors[0], proofs[0].startIndex, proofs[0].startAccrued)))
             )
         );
 
@@ -504,7 +519,7 @@ contract CometRewardsV2 {
         isValidProof = MerkleProof.verifyCalldata(
             proofs[1].startMerkleProof,
             $.startRoot,
-            keccak256(bytes.concat(keccak256(abi.encode(neighbors[1], proofs[1].index, proofs[1].startAccrued)))
+            keccak256(bytes.concat(keccak256(abi.encode(neighbors[1], proofs[1].startIndex, proofs[1].startAccrued)))
             )
         );
 
@@ -518,13 +533,19 @@ contract CometRewardsV2 {
         address src,
         address to,
         uint256 compaingId, //add array support
-        bool shouldAccrue
+        bool shouldAccrue,
+        FinisProof calldata finishProof
     ) internal {
         if (compaigns[comet].length == 0) revert NotSupported(comet, address(0));
         Compaign storage $ = compaigns[comet][compaingId];
-
         if ($.finishRoot != bytes32(0)) {
-            revert CompaignEnded(comet, compaingId);
+            bool isValidProof = MerkleProof.verifyCalldata(
+                finishProof.finishMerkleProof,
+                $.finishRoot,
+                keccak256(bytes.concat(keccak256(abi.encode(src, finishProof.finishIndex, finishProof.finishAccrued))))
+            );
+
+            if (!isValidProof) revert InvalidProof();
         }
         if (shouldAccrue) {
             //remove from loop
@@ -534,12 +555,24 @@ contract CometRewardsV2 {
             AssetConfig memory config = $.configs[$.assets[j]];
             address token = $.assets[j];
             uint256 claimed = $.claimed[src][token];
-            uint256 accrued = CometInterface(comet).baseTrackingAccrued(src);
-
-            if (config.shouldUpscale) {
-                accrued *= config.rescaleFactor;
-            } else {
-                accrued /= config.rescaleFactor;
+            uint256 accrued;
+            if($.finishRoot == bytes32(0))
+            {
+                accrued = CometInterface(comet).baseTrackingAccrued(src);
+                if (config.shouldUpscale) {
+                    accrued *= config.rescaleFactor;
+                } else {
+                    accrued /= config.rescaleFactor;
+                }
+            }
+            else{
+                accrued = getRewardAccrued(
+                    comet,
+                    src,
+                    0,
+                    finishProof.finishAccrued,
+                    config
+                );
             }
             accrued = (accrued * config.multiplier) / FACTOR_SCALE;
             if (accrued > claimed) {
@@ -567,7 +600,7 @@ contract CometRewardsV2 {
         bool isValidProof = MerkleProof.verifyCalldata(
             proofs.startMerkleProof,
             $.startRoot,
-            keccak256(bytes.concat(keccak256(abi.encode(src, proofs.index, proofs.startAccrued))))
+            keccak256(bytes.concat(keccak256(abi.encode(src, proofs.startIndex, proofs.startAccrued))))
         );
 
         if (!isValidProof) revert InvalidProof();
@@ -576,7 +609,7 @@ contract CometRewardsV2 {
             bool isValidProof2 = MerkleProof.verifyCalldata(
                 proofs.finishMerkleProof,
                 $.finishRoot,
-                keccak256(bytes.concat(keccak256(abi.encode(src, proofs.index, proofs.finishAccrued))))
+                keccak256(bytes.concat(keccak256(abi.encode(src, proofs.finishIndex, proofs.finishAccrued))))
             );
 
             if (!isValidProof2) revert InvalidProof();
