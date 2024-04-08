@@ -560,7 +560,79 @@ describe.only('CometRewardsV2', () => {
         }
       )).to.be.revertedWith('ERC20: transfer amount exceeds balance');
     });
+
+    it('can calculate rewards for all tokens in campaign with finish set for new user', async () => {
+      const {
+        comet,
+        governor,
+        tokens: { USDC, COMP },
+        users: [alice, bob, charlie],
+      } = await makeProtocol({
+        baseMinForRewards: 10e6,
+      });
+      const { rewardsV2, rewards } = await makeRewardsV2({
+        governor: governor,
+        configs: [[comet, COMP]],
+      },
+      {
+        governor: governor,
+        configs: [
+          [comet, [COMP, USDC], [exp(1, 18), exp(1, 18)]]
+        ],
+        accountsPrepared: [[alice.address, '100'], [bob.address, '200']]
+      }
+      );
+
+      // allocate and approve transfers
+      await COMP.allocateTo(rewards.address, exp(86500, 18));
+      await USDC.allocateTo(alice.address, 10e6);
+      await USDC.connect(alice).approve(comet.address, 10e6);
+      await comet.connect(alice).supply(USDC.address, 10e6);
+      
+      await USDC.allocateTo(charlie.address, 10e6);
+      await USDC.connect(charlie).approve(comet.address, 10e6);
+      await comet.connect(charlie).supply(USDC.address, 10e6);
+      await fastForward(86400*2);
+      expect(await COMP.balanceOf(alice.address)).to.be.equal(0);
+      const txn = await wait(await rewards.claim(comet.address, alice.address, true));
+
+      expect(await COMP.balanceOf(alice.address)).to.be.equal(exp(86403, 18));
+
+      // Note: First event is an ERC20 Transfer event
+
+      expect(event(txn, 1)).to.be.deep.equal({
+        RewardClaimed: {
+          src: alice.address,
+          recipient: alice.address,
+          token: COMP.address,
+          amount: exp(86403, 18),
+        },
+      });
+
+      await COMP.allocateTo(rewardsV2.address, exp(86500*2, 18));
+      await USDC.allocateTo(rewardsV2.address, exp(86500*2, 6));
+
+      const finishTree = await generateTree([[alice.address, '100'], [bob.address, '200'], [charlie.address, '555']]);
+
+      await rewardsV2.setCompaignFinish(comet.address, finishTree.root, 0);
+
+
+      const result = await rewardsV2.callStatic.getRewardOwedBatch(
+        comet.address,
+        0,
+        charlie.address,
+        0,
+        555
+      );
+
+      const amountCOMP = ethers.BigNumber.from('555').mul(exp(1,12));
+      const amountUSDC = ethers.BigNumber.from('555');
+
+      expect(result[0].owed).to.be.equal(amountCOMP);
+      expect(result[1].owed).to.be.equal(amountUSDC);
+    });
   });
+
   describe('claimTo + borrow', () => {
     it('can construct and claim rewards to target with upscale', async () => {
       const {
@@ -2873,6 +2945,124 @@ describe.only('CometRewardsV2', () => {
         },
       });
     });
+
+    it('does not overpay if finish set', async () => {
+      const {
+        comet,
+        governor,
+        tokens: { USDC, COMP },
+        users: [alice, bob],
+      } = await makeProtocol({
+        baseMinForRewards: 10e6,
+      });
+      const { rewardsV2, rewards, tree } = await makeRewardsV2({
+        governor: governor,
+        configs: [[comet, COMP]],
+      },
+      {
+        governor: governor,
+        configs: [[comet, [COMP, USDC], [exp(1, 18), exp(1, 18)]]],
+        accountsPrepared: [[alice.address, '100'], [bob.address, '200']]
+      }
+      );
+
+      // allocate and approve transfers
+      await COMP.allocateTo(rewards.address, exp(86500, 18));
+      await USDC.allocateTo(alice.address, 10e6);
+      await USDC.connect(alice).approve(comet.address, 10e6);
+      await comet.connect(alice).supply(USDC.address, 10e6);
+      
+      await fastForward(86400);
+
+      expect(await COMP.balanceOf(alice.address)).to.be.equal(0);
+      const txn = await wait(await rewards.claim(comet.address, alice.address, true));
+
+      expect(await COMP.balanceOf(alice.address)).to.be.equal(exp(86400, 18));
+
+      // Note: First event is an ERC20 Transfer event
+      expect(event(txn, 1)).to.be.deep.equal({
+        RewardClaimed: {
+          src: alice.address,
+          recipient: alice.address,
+          token: COMP.address,
+          amount: exp(86400, 18),
+        },
+      });
+
+      await COMP.allocateTo(rewardsV2.address, exp(86500*2, 18));
+      await USDC.allocateTo(rewardsV2.address, exp(86500*2, 6));
+
+      const finalAccruedAlice = await comet.baseTrackingAccrued(alice.address);
+      const finalAccruedBob = await comet.baseTrackingAccrued(bob.address);
+
+      const proofStartAlice = await getProof(alice.address, tree);
+      const finishTree = await generateTree([[alice.address, finalAccruedAlice.toString()], [bob.address, finalAccruedBob.toString()]]);
+      const proofFinishAlice = await getProof(alice.address, finishTree);
+      await rewardsV2.setCompaignFinish(comet.address, finishTree.root, 0);
+
+      const balanceBeforeCOMP = await COMP.balanceOf(alice.address);
+      const balanceBeforeUSDC = await USDC.balanceOf(alice.address);
+
+      const txnV2 = await wait(rewardsV2.claim(
+        comet.address,
+        0,
+        alice.address,
+        true,
+        {
+          startIndex: 1,
+          finishIndex: 1,
+          startAccrued: 100,
+          finishAccrued: finalAccruedAlice,
+          startMerkleProof: proofStartAlice.proof,
+          finishMerkleProof: proofFinishAlice.proof
+        }
+      ));
+
+      const amountCOMP = ethers.BigNumber.from(finalAccruedAlice.mul(exp(1,12))).sub(exp(100, 12));
+      const amountUSDC = ethers.BigNumber.from(finalAccruedAlice).sub(exp(100));
+
+      expect(await COMP.balanceOf(alice.address)).to.be.equal(amountCOMP.add(balanceBeforeCOMP));
+      expect(await USDC.balanceOf(alice.address)).to.be.equal(amountUSDC.add(balanceBeforeUSDC));
+
+      expect(event(txnV2, 1)).to.be.deep.equal({
+        RewardClaimed: {
+          src: alice.address,
+          recipient: alice.address,
+          token: COMP.address,
+          amount: amountCOMP,
+        },
+      });
+
+      expect(event(txnV2, 3)).to.be.deep.equal({
+        RewardClaimed: {
+          src: alice.address,
+          recipient: alice.address,
+          token: USDC.address,
+          amount: amountUSDC,
+        },
+      });
+
+      // Try to claim again
+      const txnV2_2 = await wait(rewardsV2.claim(
+        comet.address,
+        0,
+        alice.address,
+        true,
+        {
+          startIndex: 1,
+          finishIndex: 1,
+          startAccrued: 100,
+          finishAccrued: finalAccruedAlice,
+          startMerkleProof: proofStartAlice.proof,
+          finishMerkleProof: proofFinishAlice.proof
+        }
+      ));
+
+      expect(await COMP.balanceOf(alice.address)).to.be.equal(amountCOMP.add(balanceBeforeCOMP));
+      expect(await USDC.balanceOf(alice.address)).to.be.equal(amountUSDC.add(balanceBeforeUSDC));
+
+      expect(txnV2_2.receipt.logs).to.be.empty;  
+    });
   });
 
   describe('multiple compains', () => {
@@ -3265,8 +3455,598 @@ describe.only('CometRewardsV2', () => {
       });
     });
 
+    it('can construct and claim rewards for multiple campaigns with finish set', async () => {
+      const {
+        comet,
+        governor,
+        tokens: { USDC, COMP },
+        users: [alice, bob],
+      } = await makeProtocol({
+        baseMinForRewards: 10e6,
+      });
+      const { rewardsV2, rewards, tree } = await makeRewardsV2({
+        governor: governor,
+        configs: [[comet, COMP]],
+      },
+      {
+        governor: governor,
+        configs: [
+          [comet, [COMP, USDC], [exp(1, 18), exp(1, 18)]],
+          [comet, [COMP, USDC], [exp(1, 18), exp(1, 18)]]
+        ],
+        accountsPrepared: [[alice.address, '100'], [bob.address, '200']]
+      }
+      );
 
+      // allocate and approve transfers
+      await COMP.allocateTo(rewards.address, exp(86500, 18));
+      await USDC.allocateTo(alice.address, 10e6);
+      await USDC.connect(alice).approve(comet.address, 10e6);
+      await comet.connect(alice).supply(USDC.address, 10e6);
+      
+      await fastForward(86400);
+
+      expect(await COMP.balanceOf(alice.address)).to.be.equal(0);
+      const txn = await wait(await rewards.claim(comet.address, alice.address, true));
+
+      expect(await COMP.balanceOf(alice.address)).to.be.equal(exp(86400, 18));
+
+      // Note: First event is an ERC20 Transfer event
+      expect(event(txn, 1)).to.be.deep.equal({
+        RewardClaimed: {
+          src: alice.address,
+          recipient: alice.address,
+          token: COMP.address,
+          amount: exp(86400, 18),
+        },
+      });
+
+      await COMP.allocateTo(rewardsV2.address, exp(86500*2, 18));
+      await USDC.allocateTo(rewardsV2.address, exp(86500*2, 6));
+
+      const finalAccruedAlice = await comet.baseTrackingAccrued(alice.address);
+      const finalAccruedBob = await comet.baseTrackingAccrued(bob.address);
+
+      const proofStartAlice = await getProof(alice.address, tree);
+      const finishTree = await generateTree([[alice.address, finalAccruedAlice.toString()], [bob.address, finalAccruedBob.toString()]]);
+      const proofFinishAlice = await getProof(alice.address, finishTree);
+
+      await rewardsV2.setCompaignFinish(comet.address, finishTree.root, 0);
+
+      const balanceBeforeCOMP = await COMP.balanceOf(alice.address);
+      const balanceBeforeUSDC = await USDC.balanceOf(alice.address);
+
+      const txnV2 = await wait(rewardsV2.claimBatch(
+        comet.address,
+        [0,1],
+        alice.address,
+        true,
+        [{
+          startIndex: 1,
+          finishIndex: 1,
+          startAccrued: 100,
+          finishAccrued: finalAccruedAlice,
+          startMerkleProof: proofStartAlice.proof,
+          finishMerkleProof: proofFinishAlice.proof
+        },
+        {
+          startIndex: 1,
+          finishIndex: 1,
+          startAccrued: 100,
+          finishAccrued: finalAccruedAlice,
+          startMerkleProof: proofStartAlice.proof,
+          finishMerkleProof: proofFinishAlice.proof
+        }]
+      ));
+
+      const amountCOMP = ethers.BigNumber.from(finalAccruedAlice.mul(exp(1,12))).sub(exp(100, 12));
+      const amountUSDC = ethers.BigNumber.from(finalAccruedAlice).sub(exp(100));
+
+      expect(await COMP.balanceOf(alice.address)).to.be.equal(amountCOMP.mul(2).add(balanceBeforeCOMP));
+      expect(await USDC.balanceOf(alice.address)).to.be.equal(amountUSDC.mul(2).add(balanceBeforeUSDC));
+
+      expect(event(txnV2, 1)).to.be.deep.equal({
+        RewardClaimed: {
+          src: alice.address,
+          recipient: alice.address,
+          token: COMP.address,
+          amount: amountCOMP,
+        },
+      });
+
+      expect(event(txnV2, 3)).to.be.deep.equal({
+        RewardClaimed: {
+          src: alice.address,
+          recipient: alice.address,
+          token: USDC.address,
+          amount: amountUSDC,
+        },
+      });
+
+      expect(event(txnV2, 5)).to.be.deep.equal({
+        RewardClaimed: {
+          src: alice.address,
+          recipient: alice.address,
+          token: COMP.address,
+          amount: amountCOMP,
+        },
+      });
+
+      expect(event(txnV2, 7)).to.be.deep.equal({
+        RewardClaimed: {
+          src: alice.address,
+          recipient: alice.address,
+          token: USDC.address,
+          amount: amountUSDC,
+        },
+      });
+    });
     
+    it('can construct and claim rewards for multiple campaigns with finish set for new user', async () => {
+      const {
+        comet,
+        governor,
+        tokens: { USDC, COMP },
+        users: [alice, bob, charlie],
+      } = await makeProtocol({
+        baseMinForRewards: 10e6,
+      });
+      const { rewardsV2, rewards, tree } = await makeRewardsV2({
+        governor: governor,
+        configs: [[comet, COMP]],
+      },
+      {
+        governor: governor,
+        configs: [
+          [comet, [COMP, USDC], [exp(1, 18), exp(1, 18)]],
+          [comet, [COMP, USDC], [exp(1, 18), exp(1, 18)]]
+        ],
+        accountsPrepared: [[alice.address, '100'], [bob.address, '200']]
+      }
+      );
+
+      // allocate and approve transfers
+      await COMP.allocateTo(rewards.address, exp(86500, 18));
+      await USDC.allocateTo(alice.address, 10e6);
+      await USDC.connect(alice).approve(comet.address, 10e6);
+      await comet.connect(alice).supply(USDC.address, 10e6);
+      
+      await USDC.allocateTo(charlie.address, 10e6);
+      await USDC.connect(charlie).approve(comet.address, 10e6);
+      await comet.connect(charlie).supply(USDC.address, 10e6);
+      await fastForward(86400*2);
+      expect(await COMP.balanceOf(alice.address)).to.be.equal(0);
+      const txn = await wait(await rewards.claim(comet.address, alice.address, true));
+
+      expect(await COMP.balanceOf(alice.address)).to.be.equal(exp(86403, 18));
+
+      // Note: First event is an ERC20 Transfer event
+
+      expect(event(txn, 1)).to.be.deep.equal({
+        RewardClaimed: {
+          src: alice.address,
+          recipient: alice.address,
+          token: COMP.address,
+          amount: exp(86403, 18),
+        },
+      });
+
+      await COMP.allocateTo(rewardsV2.address, exp(86500*2, 18));
+      await USDC.allocateTo(rewardsV2.address, exp(86500*2, 6));
+
+      const proofAlice = await getProof(alice.address, tree);
+      const proofBob = await getProof(bob.address, tree);
+
+      const finishTree = await generateTree([[alice.address, '100'], [bob.address, '200'], [charlie.address, '555']]);
+
+      const proofFinishCharlie = await getProof(charlie.address, finishTree);
+
+      await rewardsV2.setCompaignFinish(comet.address, finishTree.root, 0);
+      await rewardsV2.setCompaignFinish(comet.address, finishTree.root, 1);
+
+      const balanceBeforeCOMP = await COMP.balanceOf(charlie.address);
+      const balanceBeforeUSDC = await USDC.balanceOf(charlie.address);
+
+      const txnV2 = await wait(rewardsV2.claimBatchForNewMember(
+        comet.address,
+        [0,1],
+        charlie.address,
+        true,
+        [[alice.address, bob.address], [alice.address, bob.address]],
+        [
+          {
+            proofs:[{
+              startIndex: 1,
+              finishIndex: 0,
+              startAccrued: 100,
+              finishAccrued: 0,
+              startMerkleProof: proofAlice.proof,
+              finishMerkleProof: []
+            },
+            {
+              startIndex: 2,
+              finishIndex: 0,
+              startAccrued: 200,
+              finishAccrued: 0,
+              startMerkleProof: proofBob.proof,
+              finishMerkleProof: []
+            }]
+          },
+          {
+            proofs:[{
+              startIndex: 1,
+              finishIndex: 0,
+              startAccrued: 100,
+              finishAccrued: 0,
+              startMerkleProof: proofAlice.proof,
+              finishMerkleProof: []
+            },
+            {
+              startIndex: 2,
+              finishIndex: 0,
+              startAccrued: 200,
+              finishAccrued: 0,
+              startMerkleProof: proofBob.proof,
+              finishMerkleProof: []
+            }]
+          }
+        ],
+        [
+          {
+            finishIndex: 2,
+            finishAccrued: 555,
+            finishMerkleProof: proofFinishCharlie.proof
+          },
+          {
+            finishIndex: 2,
+            finishAccrued: 555,
+            finishMerkleProof: proofFinishCharlie.proof
+          }
+        ]
+      ));
+
+      const amountCOMP = ethers.BigNumber.from('555').mul(exp(1,12));
+      const amountUSDC = ethers.BigNumber.from('555');
+
+      expect(await COMP.balanceOf(charlie.address)).to.be.equal(amountCOMP.mul(2).add(balanceBeforeCOMP));
+      expect(await USDC.balanceOf(charlie.address)).to.be.equal(amountUSDC.mul(2).add(balanceBeforeUSDC));
+
+      expect(event(txnV2, 1)).to.be.deep.equal({
+        RewardClaimed: {
+          src: charlie.address,
+          recipient: charlie.address,
+          token: COMP.address,
+          amount: amountCOMP,
+        },
+      });
+
+      expect(event(txnV2, 3)).to.be.deep.equal({
+        RewardClaimed: {
+          src: charlie.address,
+          recipient: charlie.address,
+          token: USDC.address,
+          amount: amountUSDC,
+        },
+      });
+
+      expect(event(txnV2, 5)).to.be.deep.equal({
+        RewardClaimed: {
+          src: charlie.address,
+          recipient: charlie.address,
+          token: COMP.address,
+          amount: amountCOMP,
+        },
+      });
+
+      expect(event(txnV2, 7)).to.be.deep.equal({
+        RewardClaimed: {
+          src: charlie.address,
+          recipient: charlie.address,
+          token: USDC.address,
+          amount: amountUSDC,
+        },
+      });
+    });
+
+    it('can construct and claim rewards for multiple campaigns with finish set for new user to a specific address', async () => {
+      const {
+        comet,
+        governor,
+        tokens: { USDC, COMP },
+        users: [alice, bob, charlie, derek],
+      } = await makeProtocol({
+        baseMinForRewards: 10e6,
+      });
+      const { rewardsV2, rewards, tree } = await makeRewardsV2({
+        governor: governor,
+        configs: [[comet, COMP]],
+      },
+      {
+        governor: governor,
+        configs: [
+          [comet, [COMP, USDC], [exp(1, 18), exp(1, 18)]],
+          [comet, [COMP, USDC], [exp(1, 18), exp(1, 18)]]
+        ],
+        accountsPrepared: [[alice.address, '100'], [bob.address, '200']]
+      }
+      );
+
+      // allocate and approve transfers
+      await COMP.allocateTo(rewards.address, exp(86500, 18));
+      await USDC.allocateTo(alice.address, 10e6);
+      await USDC.connect(alice).approve(comet.address, 10e6);
+      await comet.connect(alice).supply(USDC.address, 10e6);
+      
+      await USDC.allocateTo(charlie.address, 10e6);
+      await USDC.connect(charlie).approve(comet.address, 10e6);
+      await comet.connect(charlie).supply(USDC.address, 10e6);
+      await fastForward(86400*2);
+      expect(await COMP.balanceOf(alice.address)).to.be.equal(0);
+      const txn = await wait(await rewards.claim(comet.address, alice.address, true));
+
+      expect(await COMP.balanceOf(alice.address)).to.be.equal(exp(86403, 18));
+
+      // Note: First event is an ERC20 Transfer event
+
+      expect(event(txn, 1)).to.be.deep.equal({
+        RewardClaimed: {
+          src: alice.address,
+          recipient: alice.address,
+          token: COMP.address,
+          amount: exp(86403, 18),
+        },
+      });
+
+      await COMP.allocateTo(rewardsV2.address, exp(86500*2, 18));
+      await USDC.allocateTo(rewardsV2.address, exp(86500*2, 6));
+
+      const proofAlice = await getProof(alice.address, tree);
+      const proofBob = await getProof(bob.address, tree);
+
+      const finishTree = await generateTree([[alice.address, '100'], [bob.address, '200'], [charlie.address, '555']]);
+      const proofFinishCharlie = await getProof(charlie.address, finishTree);
+
+      await rewardsV2.setCompaignFinish(comet.address, finishTree.root, 0);
+      await rewardsV2.setCompaignFinish(comet.address, finishTree.root, 1);
+      await comet.connect(charlie).allow(derek.address, true);
+
+      const balanceBeforeCOMP = await COMP.balanceOf(derek.address);
+      const balanceBeforeUSDC = await USDC.balanceOf(derek.address);
+
+      const txnV2 = await wait(rewardsV2.connect(derek).claimToBatchForNewMember(
+        comet.address,
+        [0,1],
+        charlie.address,
+        derek.address,
+        true,
+        [[alice.address, bob.address], [alice.address, bob.address]],
+        [
+          {
+            proofs:[{
+              startIndex: 1,
+              finishIndex: 0,
+              startAccrued: 100,
+              finishAccrued: 0,
+              startMerkleProof: proofAlice.proof,
+              finishMerkleProof: []
+            },
+            {
+              startIndex: 2,
+              finishIndex: 0,
+              startAccrued: 200,
+              finishAccrued: 0,
+              startMerkleProof: proofBob.proof,
+              finishMerkleProof: []
+            }]
+          },
+          {
+            proofs:[{
+              startIndex: 1,
+              finishIndex: 0,
+              startAccrued: 100,
+              finishAccrued: 0,
+              startMerkleProof: proofAlice.proof,
+              finishMerkleProof: []
+            },
+            {
+              startIndex: 2,
+              finishIndex: 0,
+              startAccrued: 200,
+              finishAccrued: 0,
+              startMerkleProof: proofBob.proof,
+              finishMerkleProof: []
+            }]
+          }
+        ],
+        [
+          {
+            finishIndex: 2,
+            finishAccrued: 555,
+            finishMerkleProof: proofFinishCharlie.proof
+          },
+          {
+            finishIndex: 2,
+            finishAccrued: 555,
+            finishMerkleProof: proofFinishCharlie.proof
+          }
+        ]
+      ));
+
+      const amountCOMP = ethers.BigNumber.from('555').mul(exp(1,12));
+      const amountUSDC = ethers.BigNumber.from('555');
+
+      expect(await COMP.balanceOf(derek.address)).to.be.equal(amountCOMP.mul(2).add(balanceBeforeCOMP));
+      expect(await USDC.balanceOf(derek.address)).to.be.equal(amountUSDC.mul(2).add(balanceBeforeUSDC));
+
+      expect(event(txnV2, 1)).to.be.deep.equal({
+        RewardClaimed: {
+          src: charlie.address,
+          recipient: derek.address,
+          token: COMP.address,
+          amount: amountCOMP,
+        },
+      });
+
+      expect(event(txnV2, 3)).to.be.deep.equal({
+        RewardClaimed: {
+          src: charlie.address,
+          recipient: derek.address,
+          token: USDC.address,
+          amount: amountUSDC,
+        },
+      });
+
+      expect(event(txnV2, 5)).to.be.deep.equal({
+        RewardClaimed: {
+          src: charlie.address,
+          recipient: derek.address,
+          token: COMP.address,
+          amount: amountCOMP,
+        },
+      });
+
+      expect(event(txnV2, 7)).to.be.deep.equal({
+        RewardClaimed: {
+          src: charlie.address,
+          recipient: derek.address,
+          token: USDC.address,
+          amount: amountUSDC,
+        },
+      });
+    });
+
+    it('can construct and claim rewards for multiple campaigns with finish set to a specific address', async () => {
+      const {
+        comet,
+        governor,
+        tokens: { USDC, COMP },
+        users: [alice, bob, charlie, derek],
+      } = await makeProtocol({
+        baseMinForRewards: 10e6,
+      });
+      const { rewardsV2, rewards, tree } = await makeRewardsV2({
+        governor: governor,
+        configs: [[comet, COMP]],
+      },
+      {
+        governor: governor,
+        configs: [
+          [comet, [COMP, USDC], [exp(1, 18), exp(1, 18)]],
+          [comet, [COMP, USDC], [exp(1, 18), exp(1, 18)]]
+        ],
+        accountsPrepared: [[alice.address, '100'], [bob.address, '200']]
+      }
+      );
+
+      // allocate and approve transfers
+      await COMP.allocateTo(rewards.address, exp(86500, 18));
+      await USDC.allocateTo(alice.address, 10e6);
+      await USDC.connect(alice).approve(comet.address, 10e6);
+      await comet.connect(alice).supply(USDC.address, 10e6);
+      
+      await USDC.allocateTo(charlie.address, 10e6);
+      await USDC.connect(charlie).approve(comet.address, 10e6);
+      await comet.connect(charlie).supply(USDC.address, 10e6);
+      await fastForward(86400*2);
+      expect(await COMP.balanceOf(alice.address)).to.be.equal(0);
+      const txn = await wait(await rewards.claim(comet.address, alice.address, true));
+
+      expect(await COMP.balanceOf(alice.address)).to.be.equal(exp(86403, 18));
+
+      // Note: First event is an ERC20 Transfer event
+
+      expect(event(txn, 1)).to.be.deep.equal({
+        RewardClaimed: {
+          src: alice.address,
+          recipient: alice.address,
+          token: COMP.address,
+          amount: exp(86403, 18),
+        },
+      });
+
+      await COMP.allocateTo(rewardsV2.address, exp(86500*2, 18));
+      await USDC.allocateTo(rewardsV2.address, exp(86500*2, 6));
+
+      const finalAccruedAlice = await comet.baseTrackingAccrued(alice.address);
+      const finalAccruedBob = await comet.baseTrackingAccrued(bob.address);
+
+      const proofStartAlice = await getProof(alice.address, tree);
+      const finishTree = await generateTree([[alice.address, finalAccruedAlice.toString()], [bob.address, finalAccruedBob.toString()]]);
+      const proofFinishAlice = await getProof(alice.address, finishTree);
+
+      await rewardsV2.setCompaignFinish(comet.address, finishTree.root, 0);
+      await rewardsV2.setCompaignFinish(comet.address, finishTree.root, 1);
+      await comet.connect(alice).allow(bob.address, true);
+
+      const balanceBeforeCOMP = await COMP.balanceOf(bob.address);
+      const balanceBeforeUSDC = await USDC.balanceOf(bob.address);
+
+      const txnV2 = await wait(rewardsV2.connect(bob).claimToBatch(
+        comet.address,
+        [0,1],
+        alice.address,
+        bob.address,
+        true,
+        [{
+          startIndex: 1,
+          finishIndex: 1,
+          startAccrued: 100,
+          finishAccrued: finalAccruedAlice,
+          startMerkleProof: proofStartAlice.proof,
+          finishMerkleProof: proofFinishAlice.proof
+        },
+        {
+          startIndex: 1,
+          finishIndex: 1,
+          startAccrued: 100,
+          finishAccrued: finalAccruedAlice,
+          startMerkleProof: proofStartAlice.proof,
+          finishMerkleProof: proofFinishAlice.proof
+        }]
+      ));
+
+      const amountCOMP = ethers.BigNumber.from(finalAccruedAlice.mul(exp(1,12))).sub(exp(100, 12));
+      const amountUSDC = ethers.BigNumber.from(finalAccruedAlice).sub(exp(100));
+
+      expect(await COMP.balanceOf(bob.address)).to.be.equal(amountCOMP.mul(2).add(balanceBeforeCOMP));
+      expect(await USDC.balanceOf(bob.address)).to.be.equal(amountUSDC.mul(2).add(balanceBeforeUSDC));
+
+      expect(event(txnV2, 1)).to.be.deep.equal({
+        RewardClaimed: {
+          src: alice.address,
+          recipient: bob.address,
+          token: COMP.address,
+          amount: amountCOMP,
+        },
+      });
+
+      expect(event(txnV2, 3)).to.be.deep.equal({
+        RewardClaimed: {
+          src: alice.address,
+          recipient: bob.address,
+          token: USDC.address,
+          amount: amountUSDC,
+        },
+      });
+
+      expect(event(txnV2, 5)).to.be.deep.equal({
+        RewardClaimed: {
+          src: alice.address,
+          recipient: bob.address,
+          token: COMP.address,
+          amount: amountCOMP,
+        },
+      });
+
+      expect(event(txnV2, 7)).to.be.deep.equal({
+        RewardClaimed: {
+          src: alice.address,
+          recipient: bob.address,
+          token: USDC.address,
+          amount: amountUSDC,
+        },
+      });
+    });
   });
 });
 

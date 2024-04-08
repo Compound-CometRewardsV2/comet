@@ -266,14 +266,24 @@ contract CometRewardsV2 {
 
         CometInterface(comet).accrueAccount(account);
         uint256 claimed = $.claimed[account][token];
-        uint256 accrued = startAccrued > 0? getRewardAccrued(
+        uint256 accrued;
+        if(startAccrued > 0 || finishAccrued > 0)
+            accrued = getRewardAccrued(
                 comet,
                 account,
                 startAccrued,
                 finishAccrued,
                 config
-            )
-            : CometInterface(comet).baseTrackingAccrued(account);
+            );
+        else{
+            accrued = CometInterface(comet).baseTrackingAccrued(account);
+            if (config.shouldUpscale) {
+                accrued *= config.rescaleFactor;
+            } else {
+                accrued /= config.rescaleFactor;
+            }
+            accrued = (accrued * config.multiplier) / FACTOR_SCALE;    
+        }
 
         return RewardOwed(
             token,
@@ -288,34 +298,48 @@ contract CometRewardsV2 {
      */
     function getRewardOwedBatch(
         address comet,
-        address token,
+        uint256 compaignIds,
         address account,
         uint256 startAccrued,
         uint256 finishAccrued
-    ) external returns (RewardOwed[] memory rewardsOwed) {
-        rewardsOwed = new RewardOwed[](compaigns[comet].length);
-        for (uint256 i; i < compaigns[comet].length; i++) {
-            Compaign storage $ = compaigns[comet][i];
+    ) external returns (RewardOwed[] memory) {
+        if (compaigns[comet].length == 0) revert NotSupported(comet, address(0));
+
+        Compaign storage $ = compaigns[comet][compaignIds];
+        RewardOwed[] memory owed = new RewardOwed[]($.assets.length);
+
+        for (uint256 j; j < $.assets.length; j++) {
+            address token = $.assets[j];
             AssetConfig memory config = $.configs[token];
 
-            if (config.multiplier == 0) revert NotSupported(comet, token);
-
-            CometInterface(comet).accrueAccount(account);
-
             uint256 claimed = $.claimed[account][token];
-            uint256 accrued = getRewardAccrued(
-                comet,
-                account,
-                startAccrued,
-                finishAccrued,
-                config
-            );
+            CometInterface(comet).accrueAccount(account);
+            uint256 accrued;
+            if(startAccrued > 0 || finishAccrued > 0)
+                accrued = getRewardAccrued(
+                    comet,
+                    account,
+                    startAccrued,
+                    finishAccrued,
+                    config
+                );
+            else{
+                accrued = CometInterface(comet).baseTrackingAccrued(account);
+                if (config.shouldUpscale) {
+                    accrued *= config.rescaleFactor;
+                } else {
+                    accrued /= config.rescaleFactor;
+                }
+                accrued = (accrued * config.multiplier) / FACTOR_SCALE;    
+            }
 
-            rewardsOwed[i] = RewardOwed(
+            owed[j] = RewardOwed(
                 token,
                 accrued > claimed ? accrued - claimed : 0
             );
         }
+
+        return owed;
     }
 
     function claimForNewMember(
@@ -398,15 +422,15 @@ contract CometRewardsV2 {
         address to,
         bool shouldAccrue,
         address[2][] calldata neighbors,
-        Proofs[2][] calldata proofs,
+        MultiProofs[] calldata multiProofs,
         FinisProof[] calldata finishProof
     ) external {
         if (compaignIDs.length != neighbors.length) revert BadData();
-        if (compaignIDs.length != proofs.length) revert BadData();
+        if (compaignIDs.length != multiProofs.length) revert BadData();
         for (uint256 i; i < compaignIDs.length; i++) {
             if(!CometInterface(comet).hasPermission(src, msg.sender))
                 revert NotPermitted(msg.sender);
-            if (!verifyMembership(comet, src, compaignIDs[i], neighbors[i], proofs[i]))
+            if (!verifyMembership(comet, src, compaignIDs[i], neighbors[i], multiProofs[i].proofs))
                 revert NotANewMember(src);
 
             claimInternalForNewMember(
@@ -564,6 +588,7 @@ contract CometRewardsV2 {
                 } else {
                     accrued /= config.rescaleFactor;
                 }
+                accrued = (accrued * config.multiplier) / FACTOR_SCALE;
             }
             else{
                 accrued = getRewardAccrued(
@@ -574,7 +599,6 @@ contract CometRewardsV2 {
                     config
                 );
             }
-            accrued = (accrued * config.multiplier) / FACTOR_SCALE;
             if (accrued > claimed) {
                 uint256 owed = accrued - claimed;
                 $.claimed[src][token] = accrued;
@@ -624,14 +648,24 @@ contract CometRewardsV2 {
 
 
             uint256 claimed = $.claimed[src][token];
-            uint256 accrued = proofs.startAccrued > 0? getRewardAccrued(
-                comet,
-                src,
-                proofs.startAccrued,
-                proofs.finishAccrued,
-                config
-            )
-            : CometInterface(comet).baseTrackingAccrued(src);
+            uint256 accrued;
+            if(proofs.startAccrued > 0 || proofs.finishAccrued > 0)
+                accrued = getRewardAccrued(
+                    comet,
+                    src,
+                    proofs.startAccrued,
+                    proofs.finishAccrued,
+                    config
+                );
+            else{
+                accrued = CometInterface(comet).baseTrackingAccrued(src);
+                if (config.shouldUpscale) {
+                    accrued *= config.rescaleFactor;
+                } else {
+                    accrued /= config.rescaleFactor;
+                }
+                accrued = (accrued * config.multiplier) / FACTOR_SCALE;    
+            }
 
             if (accrued > claimed) {
                 uint256 owed = accrued - claimed;
