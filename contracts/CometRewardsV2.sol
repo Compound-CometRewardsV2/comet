@@ -266,24 +266,13 @@ contract CometRewardsV2 {
 
         CometInterface(comet).accrueAccount(account);
         uint256 claimed = $.claimed[account][token];
-        uint256 accrued;
-        if(startAccrued > 0 || finishAccrued > 0)
-            accrued = getRewardAccrued(
+        uint256 accrued = getRewardAccrued(
                 comet,
                 account,
                 startAccrued,
                 finishAccrued,
                 config
             );
-        else{
-            accrued = CometInterface(comet).baseTrackingAccrued(account);
-            if (config.shouldUpscale) {
-                accrued *= config.rescaleFactor;
-            } else {
-                accrued /= config.rescaleFactor;
-            }
-            accrued = (accrued * config.multiplier) / FACTOR_SCALE;    
-        }
 
         return RewardOwed(
             token,
@@ -314,24 +303,13 @@ contract CometRewardsV2 {
 
             uint256 claimed = $.claimed[account][token];
             CometInterface(comet).accrueAccount(account);
-            uint256 accrued;
-            if(startAccrued > 0 || finishAccrued > 0)
-                accrued = getRewardAccrued(
-                    comet,
-                    account,
-                    startAccrued,
-                    finishAccrued,
-                    config
-                );
-            else{
-                accrued = CometInterface(comet).baseTrackingAccrued(account);
-                if (config.shouldUpscale) {
-                    accrued *= config.rescaleFactor;
-                } else {
-                    accrued /= config.rescaleFactor;
-                }
-                accrued = (accrued * config.multiplier) / FACTOR_SCALE;    
-            }
+            uint256 accrued = getRewardAccrued(
+                comet,
+                account,
+                startAccrued,
+                finishAccrued,
+                config
+            );
 
             owed[j] = RewardOwed(
                 token,
@@ -648,24 +626,13 @@ contract CometRewardsV2 {
 
 
             uint256 claimed = $.claimed[src][token];
-            uint256 accrued;
-            if(proofs.startAccrued > 0 || proofs.finishAccrued > 0)
-                accrued = getRewardAccrued(
-                    comet,
-                    src,
-                    proofs.startAccrued,
-                    proofs.finishAccrued,
-                    config
-                );
-            else{
-                accrued = CometInterface(comet).baseTrackingAccrued(src);
-                if (config.shouldUpscale) {
-                    accrued *= config.rescaleFactor;
-                } else {
-                    accrued /= config.rescaleFactor;
-                }
-                accrued = (accrued * config.multiplier) / FACTOR_SCALE;    
-            }
+            uint256 accrued = getRewardAccrued(
+                comet,
+                src,
+                proofs.startAccrued,
+                proofs.finishAccrued,
+                config
+            );
 
             if (accrued > claimed) {
                 uint256 owed = accrued - claimed;

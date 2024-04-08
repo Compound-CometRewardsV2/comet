@@ -3920,7 +3920,7 @@ describe.only('CometRewardsV2', () => {
         comet,
         governor,
         tokens: { USDC, COMP },
-        users: [alice, bob, charlie, derek],
+        users: [alice, bob, charlie],
       } = await makeProtocol({
         baseMinForRewards: 10e6,
       });
