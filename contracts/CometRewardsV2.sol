@@ -102,7 +102,6 @@ contract CometRewardsV2 {
     error TransferOutFailed(address, uint256);
     error NullGovernor();
     error InvalidProof();
-    error AlreadyConfigured(address);
     error NotANewMember(address);
     error CompaignEnded(address, uint256);
 
@@ -239,6 +238,7 @@ contract CometRewardsV2 {
      */
     function transferGovernor(address newGovernor) external {
         if (msg.sender != governor) revert NotPermitted(msg.sender);
+        if (newGovernor == address(0)) revert NullGovernor();
 
         emit GovernorTransferred(governor, newGovernor);
         governor = newGovernor;
@@ -258,6 +258,7 @@ contract CometRewardsV2 {
         uint256 finishAccrued
     ) external returns (RewardOwed memory) {        
         if (compaigns[comet].length == 0) revert NotSupported(comet, address(0));
+        if(compaignId >= compaigns[comet].length) revert BadData();
 
         Compaign storage $ = compaigns[comet][compaignId];
         AssetConfig memory config = $.configs[token];
@@ -287,14 +288,15 @@ contract CometRewardsV2 {
      */
     function getRewardOwedBatch(
         address comet,
-        uint256 compaignIds,
+        uint256 compaignId,
         address account,
         uint256 startAccrued,
         uint256 finishAccrued
     ) external returns (RewardOwed[] memory) {
         if (compaigns[comet].length == 0) revert NotSupported(comet, address(0));
+        if(compaignId >= compaigns[comet].length) revert BadData();
 
-        Compaign storage $ = compaigns[comet][compaignIds];
+        Compaign storage $ = compaigns[comet][compaignId];
         RewardOwed[] memory owed = new RewardOwed[]($.assets.length);
 
         for (uint256 j; j < $.assets.length; j++) {
@@ -329,8 +331,7 @@ contract CometRewardsV2 {
         Proofs[2] calldata proofs,
         FinisProof calldata finishProof
     ) external {
-        if (!verifyMembership(comet, src, compaignId, neighbors, proofs))
-            revert NotANewMember(src);
+        verifyMembership(comet, src, compaignId, neighbors, proofs);
 
         claimInternalForNewMember(
             comet,
@@ -354,8 +355,7 @@ contract CometRewardsV2 {
         if (compaignIDs.length != neighbors.length) revert BadData();
         if (compaignIDs.length != multiProofs.length) revert BadData();
         for (uint256 i; i < compaignIDs.length; i++) {
-            if (!verifyMembership(comet, src, compaignIDs[i], neighbors[i], multiProofs[i].proofs))
-                revert NotANewMember(src);
+            verifyMembership(comet, src, compaignIDs[i], neighbors[i], multiProofs[i].proofs);
 
             claimInternalForNewMember(
                 comet,
@@ -380,8 +380,8 @@ contract CometRewardsV2 {
     ) external {
         if(!CometInterface(comet).hasPermission(src, msg.sender))
             revert NotPermitted(msg.sender);
-        if (!verifyMembership(comet, src, compaignId, neighbors, proofs))
-            revert NotANewMember(src);
+        
+        verifyMembership(comet, src, compaignId, neighbors, proofs);
 
         claimInternalForNewMember(
             comet,
@@ -408,8 +408,8 @@ contract CometRewardsV2 {
         for (uint256 i; i < compaignIDs.length; i++) {
             if(!CometInterface(comet).hasPermission(src, msg.sender))
                 revert NotPermitted(msg.sender);
-            if (!verifyMembership(comet, src, compaignIDs[i], neighbors[i], multiProofs[i].proofs))
-                revert NotANewMember(src);
+            
+            verifyMembership(comet, src, compaignIDs[i], neighbors[i], multiProofs[i].proofs);
 
             claimInternalForNewMember(
                 comet,
@@ -477,6 +477,14 @@ contract CometRewardsV2 {
         return compaigns[comet][compaignId].claimed[src][token];
     }
 
+    function rewardConfig(
+        address comet,
+        uint256 compaignId,
+        address token
+    ) external view returns(AssetConfig memory) {
+        return compaigns[comet][compaignId].configs[token];
+    }
+
     /**
      * @notice Claim rewards of token type from a comet instance to a target address
      * @param comet The protocol instance
@@ -507,6 +515,8 @@ contract CometRewardsV2 {
         if(!(neighbors[0] < account && account < neighbors[1])) revert BadData();
         if(!((proofs[1].startIndex > proofs[0].startIndex) && (proofs[1].startIndex - proofs[0].startIndex == 1))) revert BadData();
         if (compaigns[comet].length == 0) revert NotSupported(comet, address(0));
+        if(compaignId >= compaigns[comet].length) revert BadData();
+
         Compaign storage $ = compaigns[comet][compaignId];
 
         bool isValidProof = MerkleProof.verifyCalldata(
@@ -534,12 +544,11 @@ contract CometRewardsV2 {
         address comet,
         address src,
         address to,
-        uint256 compaingId, //add array support
+        uint256 compaignId, //add array support
         bool shouldAccrue,
         FinisProof calldata finishProof
     ) internal {
-        if (compaigns[comet].length == 0) revert NotSupported(comet, address(0));
-        Compaign storage $ = compaigns[comet][compaingId];
+        Compaign storage $ = compaigns[comet][compaignId];
         if ($.finishRoot != bytes32(0)) {
             bool isValidProof = MerkleProof.verifyCalldata(
                 finishProof.finishMerkleProof,
@@ -587,17 +596,17 @@ contract CometRewardsV2 {
         }
     }
 
-
     function claimInternal(
         address comet,
         address src,
         address to,
-        uint256 compaingId, //add array support
+        uint256 compaignId, //add array support
         Proofs calldata proofs,
         bool shouldAccrue
     ) internal {
         if (compaigns[comet].length == 0) revert NotSupported(comet, address(0));
-        Compaign storage $ = compaigns[comet][compaingId];
+        if(compaignId >= compaigns[comet].length) revert BadData();
+        Compaign storage $ = compaigns[comet][compaignId];
         
         bool isValidProof = MerkleProof.verifyCalldata(
             proofs.startMerkleProof,
@@ -653,7 +662,9 @@ contract CometRewardsV2 {
         bool shouldAccrue
     ) internal {
         if (compaingIds.length != proofs.length) revert BadData();
+        if(compaigns[comet].length == 0) revert NotSupported(comet, address(0));
         for (uint256 i; i < compaingIds.length; i++) {
+            if(compaingIds[i] >= compaigns[comet].length) revert BadData();
             claimInternal(
                 comet,
                 src,
