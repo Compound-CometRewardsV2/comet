@@ -37,21 +37,9 @@ contract CometRewards {
 
     /** Custom events **/
 
-    event GovernorTransferred(
-        address indexed oldGovernor,
-        address indexed newGovernor
-    );
-    event RewardsClaimedSet(
-        address indexed user,
-        address indexed comet,
-        uint256 amount
-    );
-    event RewardClaimed(
-        address indexed src,
-        address indexed recipient,
-        address indexed token,
-        uint256 amount
-    );
+    event GovernorTransferred(address indexed oldGovernor, address indexed newGovernor);
+    event RewardsClaimedSet(address indexed user, address indexed comet, uint256 amount);
+    event RewardClaimed(address indexed src, address indexed recipient, address indexed token, uint256 amount);
 
     /** Custom errors **/
 
@@ -76,14 +64,9 @@ contract CometRewards {
      * @param token The reward token address
      * @param multiplier The multiplier for converting a unit of accrued tracking to a unit of the reward token
      */
-    function setRewardConfigWithMultiplier(
-        address comet,
-        address token,
-        uint256 multiplier
-    ) public {
+    function setRewardConfigWithMultiplier(address comet, address token, uint256 multiplier) public {
         if (msg.sender != governor) revert NotPermitted(msg.sender);
-        if (rewardConfig[comet].token != address(0))
-            revert AlreadyConfigured(comet);
+        if (rewardConfig[comet].token != address(0)) revert AlreadyConfigured(comet);
 
         uint64 accrualScale = CometInterface(comet).baseAccrualScale();
         uint8 tokenDecimals = ERC20(token).decimals();
@@ -120,20 +103,14 @@ contract CometRewards {
      * @param users The list of users to populate the data for
      * @param claimedAmounts The list of claimed amounts to populate the data with
      */
-    function setRewardsClaimed(
-        address comet,
-        address[] calldata users,
-        uint[] calldata claimedAmounts
-    ) external {
+    function setRewardsClaimed(address comet, address[] calldata users, uint[] calldata claimedAmounts) external {
         if (msg.sender != governor) revert NotPermitted(msg.sender);
         if (users.length != claimedAmounts.length) revert BadData();
 
         for (uint i = 0; i < users.length; ) {
             rewardsClaimed[comet][users[i]] = claimedAmounts[i];
             emit RewardsClaimedSet(users[i], comet, claimedAmounts[i]);
-            unchecked {
-                i++;
-            }
+            unchecked { i++; }
         }
     }
 
@@ -166,17 +143,14 @@ contract CometRewards {
      * @param comet The protocol instance
      * @param account The account to check rewards for
      */
-    function getRewardOwed(
-        address comet,
-        address account
-    ) external returns (RewardOwed memory) {
+    function getRewardOwed(address comet, address account) external returns (RewardOwed memory) {
         RewardConfig memory config = rewardConfig[comet];
         if (config.token == address(0)) revert NotSupported(comet);
 
         CometInterface(comet).accrueAccount(account);
 
         uint claimed = rewardsClaimed[comet][account];
-        uint accrued = CometInterface(comet).baseTrackingAccrued(account);
+        uint accrued = getRewardAccrued(comet, account, config);
 
         uint owed = accrued > claimed ? accrued - claimed : 0;
         return RewardOwed(config.token, owed);
@@ -198,14 +172,8 @@ contract CometRewards {
      * @param src The owner to claim for
      * @param to The address to receive the rewards
      */
-    function claimTo(
-        address comet,
-        address src,
-        address to,
-        bool shouldAccrue
-    ) external {
-        if (!CometInterface(comet).hasPermission(src, msg.sender))
-            revert NotPermitted(msg.sender);
+    function claimTo(address comet, address src, address to, bool shouldAccrue) external {
+        if (!CometInterface(comet).hasPermission(src, msg.sender)) revert NotPermitted(msg.sender);
 
         claimInternal(comet, src, to, shouldAccrue);
     }
@@ -213,12 +181,7 @@ contract CometRewards {
     /**
      * @dev Claim to, assuming permitted
      */
-    function claimInternal(
-        address comet,
-        address src,
-        address to,
-        bool shouldAccrue
-    ) internal {
+    function claimInternal(address comet, address src, address to, bool shouldAccrue) internal {
         RewardConfig memory config = rewardConfig[comet];
         if (config.token == address(0)) revert NotSupported(comet);
 
@@ -227,21 +190,29 @@ contract CometRewards {
         }
 
         uint claimed = rewardsClaimed[comet][src];
-        uint accrued = CometInterface(comet).baseTrackingAccrued(src);
+        uint accrued = getRewardAccrued(comet, src, config);
 
         if (accrued > claimed) {
             uint owed = accrued - claimed;
-            if (config.shouldUpscale) {
-                owed *= config.rescaleFactor;
-            } else {
-                owed /= config.rescaleFactor;
-            }
-            owed = (owed * config.multiplier) / FACTOR_SCALE;
             rewardsClaimed[comet][src] = accrued;
             doTransferOut(config.token, to, owed);
 
             emit RewardClaimed(src, to, config.token, owed);
         }
+    }
+
+    /**
+     * @dev Calculates the reward accrued for an account on a Comet deployment
+     */
+    function getRewardAccrued(address comet, address account, RewardConfig memory config) internal view returns (uint) {
+        uint accrued = CometInterface(comet).baseTrackingAccrued(account);
+
+        if (config.shouldUpscale) {
+            accrued *= config.rescaleFactor;
+        } else {
+            accrued /= config.rescaleFactor;
+        }
+        return accrued * config.multiplier / FACTOR_SCALE;
     }
 
     /**
